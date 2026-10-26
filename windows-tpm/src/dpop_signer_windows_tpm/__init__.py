@@ -154,8 +154,8 @@ _crypt32.CertCloseStore.restype = wintypes.BOOL
 # NCryptSignHash
 _ncrypt.NCryptSignHash.argtypes = [
     ctypes.c_void_p, ctypes.c_void_p,
-    ctypes.c_void_p, wintypes.DWORD,
-    ctypes.c_void_p, wintypes.DWORD,
+    ctypes.c_char_p, wintypes.DWORD,
+    ctypes.c_char_p, wintypes.DWORD,
     ctypes.POINTER(wintypes.DWORD), wintypes.DWORD,
 ]
 _ncrypt.NCryptSignHash.restype = wintypes.LONG
@@ -230,7 +230,7 @@ def _acquire_ncrypt_key(cert_ctx):
 
     ok = _crypt32.CryptAcquireCertificatePrivateKey(
         cert_ctx,
-        _CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG | _CRYPT_ACQUIRE_CACHE_FLAG,
+        _CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG,
         None,
         ctypes.byref(h_key),
         ctypes.byref(key_spec),
