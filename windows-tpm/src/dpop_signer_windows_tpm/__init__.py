@@ -154,8 +154,8 @@ _crypt32.CertCloseStore.restype = wintypes.BOOL
 # NCryptSignHash
 _ncrypt.NCryptSignHash.argtypes = [
     ctypes.c_void_p, ctypes.c_void_p,
-    ctypes.c_char_p, wintypes.DWORD,
-    ctypes.c_char_p, wintypes.DWORD,
+    ctypes.c_void_p, wintypes.DWORD,
+    ctypes.c_void_p, wintypes.DWORD,
     ctypes.POINTER(wintypes.DWORD), wintypes.DWORD,
 ]
 _ncrypt.NCryptSignHash.restype = wintypes.LONG
