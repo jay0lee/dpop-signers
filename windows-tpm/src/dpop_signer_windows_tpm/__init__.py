@@ -203,7 +203,7 @@ def _find_cert_by_subject(h_store, subject):
 def _find_cert_by_thumbprint(h_store, thumbprint_hex):
     """Find a certificate by SHA-1 thumbprint (hex string)."""
     thumb_bytes = bytes.fromhex(thumbprint_hex)
-    blob_array = (ctypes.c_byte * len(thumb_bytes))(*thumb_bytes)
+    blob_array = (ctypes.c_ubyte * len(thumb_bytes))(*thumb_bytes)
     blob = _CRYPT_HASH_BLOB()
     blob.cbData = len(thumb_bytes)
     blob.pbData = blob_array
@@ -253,9 +253,10 @@ def _extract_public_key_from_cert(cert_ctx):
     """
     from cryptography import x509
 
-    der_bytes = bytes(cert_ctx.contents.pbCertEncoded[
-        :cert_ctx.contents.cbCertEncoded
-    ])
+    der_bytes = ctypes.string_at(
+        cert_ctx.contents.pbCertEncoded,
+        cert_ctx.contents.cbCertEncoded,
+    )
     cert = x509.load_der_x509_certificate(der_bytes)
     return cert.public_key()
 
