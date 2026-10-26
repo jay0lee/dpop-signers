@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dpop-signer-linux-tpm"
+version = "0.1.0"
+description = "Linux TPM 2.0 DPoP signer for google-auth"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [
+    {name = "Jay Lee"},
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security :: Cryptography",
+]
+dependencies = [
+    "google-auth>=2.15.0",
+    "tpm2-pytss>=2.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/jay0lee/dpop-signers"
+
+[tool.setuptools.packages.find]
+where = ["src"]
