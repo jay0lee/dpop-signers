@@ -203,7 +203,7 @@ def _find_cert_by_subject(h_store, subject):
 def _find_cert_by_thumbprint(h_store, thumbprint_hex):
     """Find a certificate by SHA-1 thumbprint (hex string)."""
     thumb_bytes = bytes.fromhex(thumbprint_hex)
-    blob_array = (ctypes.c_ubyte * len(thumb_bytes))(*thumb_bytes)
+    blob_array = (ctypes.c_byte * len(thumb_bytes))(*thumb_bytes)
     blob = _CRYPT_HASH_BLOB()
     blob.cbData = len(thumb_bytes)
     blob.pbData = blob_array
