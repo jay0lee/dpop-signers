@@ -236,8 +236,17 @@ class LinuxTPMDPoPSigner(DPoPSigner):
             # so we must always set it before using PASSWORD sessions.
             ectx.tr_set_auth(key_handle, self._auth if self._auth else None)
 
-            # Build signing scheme.
-            scheme = TPMT_SIG_SCHEME(scheme=TPM2_ALG.NULL)
+            # Explicitly specify the signing scheme rather than relying
+            # on the key's embedded scheme.  Keys created with a NULL
+            # scheme (flexible keys) require the caller to specify the
+            # algorithm; keys with a fixed scheme accept either NULL
+            # or the same explicit scheme.  Specifying it explicitly
+            # handles both cases correctly.
+            if self._algorithm == "ES256":
+                scheme = TPMT_SIG_SCHEME(scheme=TPM2_ALG.ECDSA)
+            else:  # RS256
+                scheme = TPMT_SIG_SCHEME(scheme=TPM2_ALG.RSASSA)
+            scheme.details.any.hashAlg = TPM2_ALG.SHA256
 
             # Null validation ticket for externally-hashed data.
             validation = TPMT_TK_HASHCHECK(
