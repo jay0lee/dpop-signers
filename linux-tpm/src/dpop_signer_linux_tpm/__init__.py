@@ -231,9 +231,8 @@ class LinuxTPMDPoPSigner(DPoPSigner):
         try:
             key_handle = ectx.tr_from_tpmpublic(self._handle_int)
 
-            # Set authorization if provided.
-            if self._auth:
-                ectx.tr_set_auth(key_handle, self._auth)
+            # Set authorization value (empty string if no password).
+            ectx.tr_set_auth(key_handle, self._auth or "")
 
             # Build signing scheme.
             scheme = TPMT_SIG_SCHEME(scheme=TPM2_ALG.NULL)
