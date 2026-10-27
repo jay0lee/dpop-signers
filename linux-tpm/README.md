@@ -14,7 +14,13 @@ pip install dpop-signer-linux-tpm
 Requires `tpm2-tss` system libraries. On Debian/Ubuntu:
 
 ```bash
-sudo apt install libtss2-dev
+sudo apt install libtss2-dev tpm2-tools
+```
+
+On Fedora/RHEL:
+
+```bash
+sudo dnf install tpm2-tss-devel tpm2-tools
 ```
 
 ## Usage
@@ -27,15 +33,73 @@ signer = LinuxTPMDPoPSigner(handle=0x81000001)
 
 ## Key Setup
 
+No certificate is needed. The TPM stores raw key objects and makes them
+available by persistent handle. Keys created this way never leave the TPM.
+
+### Create and persist a P-256 signing key
+
 ```bash
-# Create a primary key under the owner hierarchy
+# 1. Create a primary key under the owner hierarchy
 tpm2_createprimary -C o -g sha256 -G ecc256 -c primary.ctx
 
-# Create a signing key
+# 2. Create an ECDSA P-256 signing key under the primary
 tpm2_create -C primary.ctx -g sha256 -G ecc256 \
-    -u key.pub -r key.priv -a "fixedtpm|fixedparent|sensitivedataorigin|userwithauth|sign"
+    -u key.pub -r key.priv \
+    -a "fixedtpm|fixedparent|sensitivedataorigin|userwithauth|sign"
 
-# Load and persist at handle 0x81000001
+# 3. Load the key into the TPM
 tpm2_load -C primary.ctx -u key.pub -r key.priv -c key.ctx
+
+# 4. Make it persistent at handle 0x81000001
 tpm2_evictcontrol -C o -c key.ctx 0x81000001
+
+# 5. Clean up temporary context files
+rm primary.ctx key.ctx key.pub key.priv
 ```
+
+### Verify the key is persistent
+
+```bash
+tpm2_getcap handles-persistent
+```
+
+Should show `0x81000001` in the output.
+
+### Read the public key (for reference)
+
+```bash
+tpm2_readpublic -c 0x81000001
+```
+
+### Delete a persistent key
+
+```bash
+tpm2_evictcontrol -C o -c 0x81000001
+```
+
+### Using a different handle
+
+The handle `0x81000001` is a convention. Any handle in the persistent range
+(`0x81000000`–`0x8100FFFF`) works:
+
+```python
+signer = LinuxTPMDPoPSigner(handle=0x81000002)
+```
+
+### Permissions
+
+Access to `/dev/tpmrm0` (the TPM resource manager) typically requires
+membership in the `tss` group:
+
+```bash
+sudo usermod -aG tss $USER
+# Log out and back in for the group change to take effect
+```
+
+### Notes
+
+- No certificate is involved — TPM keys are referenced by handle, not by cert.
+- Key persistence survives reboots. The key remains until explicitly evicted.
+- Only ECDSA P-256 (ES256) is currently supported by this signer.
+- The primary key context is only needed during key creation. The persistent
+  handle is all that's needed afterward.
