@@ -232,8 +232,8 @@ class LinuxTPMDPoPSigner(DPoPSigner):
             key_handle = ectx.tr_from_tpmpublic(self._handle_int)
 
             # Set authorization value for the key handle.
-            # Must always be called even for no-password keys, otherwise
-            # the ESAPI PASSWORD session HMAC uses uninitialized auth data.
+            # tr_from_tpmpublic creates a bare handle without auth context,
+            # so we must always set it before using PASSWORD sessions.
             ectx.tr_set_auth(key_handle, self._auth if self._auth else None)
 
             # Build signing scheme.
