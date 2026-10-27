@@ -231,8 +231,10 @@ class LinuxTPMDPoPSigner(DPoPSigner):
         try:
             key_handle = ectx.tr_from_tpmpublic(self._handle_int)
 
-            # Set authorization value (empty string if no password).
-            ectx.tr_set_auth(key_handle, self._auth or "")
+            # Set authorization value for the key handle.
+            # Must always be called even for no-password keys, otherwise
+            # the ESAPI PASSWORD session HMAC uses uninitialized auth data.
+            ectx.tr_set_auth(key_handle, self._auth if self._auth else None)
 
             # Build signing scheme.
             scheme = TPMT_SIG_SCHEME(scheme=TPM2_ALG.NULL)
