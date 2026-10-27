@@ -50,6 +50,22 @@ Get-ChildItem Cert:\CurrentUser\My | Where-Object Subject -eq "CN=DPoP Signing" 
     Format-List Subject, Thumbprint, NotAfter, HasPrivateKey
 ```
 
+### Use with DPoPSigner
+
+The `subject` parameter matches the CN from `-Subject` (without the `CN=`
+prefix). You can also use the certificate's `Thumbprint` shown in the verify
+step above:
+
+```python
+from dpop_signer_windows_tpm import WindowsCNGDPoPSigner
+
+# By subject — matches -Subject "CN=DPoP Signing" above
+signer = WindowsCNGDPoPSigner(subject="DPoP Signing")
+
+# Or by thumbprint from the verify output
+signer = WindowsCNGDPoPSigner(thumbprint="A1B2C3D4...")
+```
+
 ### Confirm TPM backing
 
 ```powershell

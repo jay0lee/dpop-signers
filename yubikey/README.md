@@ -54,6 +54,21 @@ rm pubkey.pem
 ykman piv info
 ```
 
+### Use with DPoPSigner
+
+The `slot` parameter matches the slot you generated the key in (above: `9c`).
+The default slot is `9c` (SIGNATURE), so if you used that you can omit it:
+
+```python
+from dpop_signer_yubikey import YubiKeyDPoPSigner
+
+# Matches the key generated in slot 9c above
+signer = YubiKeyDPoPSigner(pin="123456")
+
+# Or explicitly specify the slot
+signer = YubiKeyDPoPSigner(slot="9c", pin="123456")
+```
+
 ### Available slots
 
 | Slot | Name | Touch policy |

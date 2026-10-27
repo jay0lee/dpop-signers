@@ -69,6 +69,23 @@ tpm2_getcap handles-persistent
 
 Should show `0x81000001` in the output.
 
+### Use with DPoPSigner
+
+The `handle` parameter matches the persistent handle from step 4 above:
+
+```python
+from dpop_signer_linux_tpm import LinuxTPMDPoPSigner
+
+# Matches: tpm2_evictcontrol -C o -c key.ctx 0x81000001
+signer = LinuxTPMDPoPSigner(handle=0x81000001)
+```
+
+To discover existing persistent handles:
+
+```bash
+tpm2_getcap handles-persistent
+```
+
 ### Read the public key (for reference)
 
 ```bash

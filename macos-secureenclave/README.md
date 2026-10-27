@@ -43,6 +43,23 @@ sc_auth create-ctk-identity -l dpop-signing -k p-256-ne -t bio
 sc_auth list-ctk-identities
 ```
 
+### Use with DPoPSigner
+
+The `label` parameter matches the `-l` value you used during key creation:
+
+```python
+from dpop_signer_macos_secureenclave import SecureEnclaveDPoPSigner
+
+# Matches: sc_auth create-ctk-identity -l dpop-signing -k p-256-ne
+signer = SecureEnclaveDPoPSigner(label="dpop-signing")
+```
+
+You can also look up existing identities and their labels with:
+
+```bash
+sc_auth list-ctk-identities
+```
+
 ### About the self-signed certificate
 
 `sc_auth create-ctk-identity` generates a self-signed certificate alongside
