@@ -27,6 +27,13 @@ pip install dpop-signer-fido2-previewsign
 Requires the [python-fido2](https://github.com/Yubico/python-fido2) library
 (`fido2 >= 2.2.0`).
 
+> **NOTE**: Every signing operation requires a **physical touch** of the
+> security key. This is inherent to FIDO2 `getAssertion` and cannot be
+> disabled. Since DPoP proofs are only generated at token refresh (~once
+> per hour), this is manageable for interactive sessions but makes this
+> signer unsuitable for unattended/background processes. See the
+> [comparison table](#comparison-with-other-signers) below.
+
 ## How It Works
 
 Unlike the PIV-based `dpop-signer-yubikey` which uses the YubiKey's PIV
@@ -95,7 +102,7 @@ creds = DPoPCredentials.from_authorized_user_file(
 )
 ```
 
-## Comparison with dpop-signer-yubikey
+## Comparison with Other Signers
 
 | Feature | fido2-previewsign | yubikey (PIV) |
 |---------|-------------------|---------------|
@@ -104,10 +111,23 @@ creds = DPoPCredentials.from_authorized_user_file(
 | Hardware | Any CTAP 2.3 key | YubiKey only |
 | PIV management key | Not needed | Required for key gen |
 | X.509 certificate | Not needed | Required by PIV |
-| PIN | FIDO2 PIN | PIV PIN |
-| Touch | Per assertion | Per slot policy |
+| PIN | FIDO2 PIN (once per session) | PIV PIN (once per session) |
+| Touch per sign | **Yes, always** | No (slot 9c after PIN) |
+| Unattended use | No | Yes |
 | Key generation | On-device via ARKG | On-device via PIV |
 | Maturity | Experimental preview | Stable |
+
+### Touch / biometric requirements across all signers
+
+| Signer | Touch per sign? | PIN/biometric per sign? | Unattended? |
+|--------|----------------|------------------------|-------------|
+| Software (PEM) | No | No | Yes |
+| YubiKey PIV (slot 9c) | No | Once per session | Yes |
+| macOS Secure Enclave | No | Optional (if created with `-t bio`) | Depends |
+| Windows CNG/TPM | No | No | Yes |
+| Linux TPM | No | No | Yes |
+| ECP | No | No | Yes |
+| **FIDO2 previewSign** | **Yes, every time** | Once per session | **No** |
 
 ## Constructor Parameters
 
