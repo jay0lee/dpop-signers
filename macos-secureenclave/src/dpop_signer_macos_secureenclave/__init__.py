@@ -26,7 +26,7 @@ Key setup (macOS 15+, Secure Enclave)::
     sc_auth create-ctk-identity -t com.apple.setoken
 
     # List available identities
-    sc_auth identities
+    sc_auth list-ctk-identities
 
 Usage::
 
@@ -250,7 +250,7 @@ class SecureEnclaveDPoPSigner(DPoPSigner):
 
     Args:
         label (str): Keychain identity label to search for.  Use
-            ``sc_auth identities`` to find the label for a Secure
+            ``sc_auth list-ctk-identities`` to find the label for a Secure
             Enclave identity.
         application_tag (Union[str, bytes]): Application tag for
             standalone key lookup (alternative to *label*).
@@ -304,7 +304,7 @@ class SecureEnclaveDPoPSigner(DPoPSigner):
             if status == _errSecItemNotFound:
                 raise SecureEnclaveDPoPError(
                     f"No identity found with label '{label}'. "
-                    "Run 'sc_auth identities' to list available identities."
+                    "Run 'sc_auth list-ctk-identities' to list available identities."
                 )
             if status != _errSecSuccess:
                 raise SecureEnclaveDPoPError(
