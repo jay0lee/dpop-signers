@@ -13,6 +13,7 @@ need.
 | Package | Platform | Hardware | Extra deps |
 |---------|----------|----------|------------|
 | [dpop-signer-yubikey](yubikey/) | Any | YubiKey PIV | `yubikey-manager` |
+| [dpop-signer-fido2-previewsign](fido2-previewsign/) | Any | FIDO2 CTAP 2.3 (previewSign) | `fido2` |
 | [dpop-signer-macos-secureenclave](macos-secureenclave/) | macOS | Secure Enclave | none |
 | [dpop-signer-windows-tpm](windows-tpm/) | Windows | TPM (via CNG) | none |
 | [dpop-signer-linux-tpm](linux-tpm/) | Linux | TPM 2.0 | `tpm2-pytss` |
