@@ -46,10 +46,10 @@ applet (PKCS#11-style), this signer uses the FIDO2/CTAP2 protocol directly:
 Generate a signing credential directly on the security key:
 
 ```python
-from dpop_signer_fido2_previewsign import Fido2PreviewSignDPoPSigner
+from dpop_signer_fido2_previewsign import generate_signing_credential
 
 # Insert your security key and run:
-signer = Fido2PreviewSignDPoPSigner.generate()
+signer = generate_signing_credential()
 # You will be prompted for PIN and touch
 
 # Save the credential for later use (no private key leaves the device)
@@ -58,7 +58,7 @@ saved = json.dumps(signer.to_dict())
 print(saved)
 ```
 
-The `generate()` method will:
+The `generate_signing_credential()` function will:
 1. Find a connected FIDO2 device
 2. Verify it supports the `previewSign` extension
 3. Prompt for PIN and touch confirmation
@@ -78,11 +78,14 @@ signer = Fido2PreviewSignDPoPSigner.from_dict(saved)
 ## Use with DPoPCredentials
 
 ```python
-from dpop_signer_fido2_previewsign import Fido2PreviewSignDPoPSigner
+from dpop_signer_fido2_previewsign import (
+    Fido2PreviewSignDPoPSigner,
+    generate_signing_credential,
+)
 from google.oauth2.dpop_credentials import DPoPCredentials
 
 # Generate a new credential (first time only)
-signer = Fido2PreviewSignDPoPSigner.generate()
+signer = generate_signing_credential()
 
 # Or restore a saved credential
 # signer = Fido2PreviewSignDPoPSigner.from_dict(saved_data)

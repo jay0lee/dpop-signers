@@ -397,94 +397,97 @@ class YubiKeyDPoPSigner(DPoPSigner):
 
             return raw_or_der_sig
 
-    @classmethod
-    def generate_key_in_slot(
-        cls,
-        slot: Union[str, int, SLOT] = SLOT.SIGNATURE,
-        serial: Optional[int] = None,
-        key_type: KEY_TYPE = KEY_TYPE.ECCP256,
-        pin: Optional[str] = None,
-        management_key: bytes = DEFAULT_MANAGEMENT_KEY,
-        touch_policy: TOUCH_POLICY = TOUCH_POLICY.DEFAULT,
-        pin_policy: PIN_POLICY = PIN_POLICY.DEFAULT,
-        subject: str = "CN=Google OAuth DPoP Client",
-        device: Optional[Any] = None,
-    ) -> YubiKeyDPoPSigner:
-        """Generates a fresh asymmetric keypair directly inside the YubiKey PIV slot.
 
-        Also generates a self-signed X.509 certificate and stores it in the slot so
-        that both the slot metadata and certificate are recognized across all tools.
+def generate_key_in_slot(
+    slot: Union[str, int, SLOT] = SLOT.SIGNATURE,
+    serial: Optional[int] = None,
+    key_type: KEY_TYPE = KEY_TYPE.ECCP256,
+    pin: Optional[str] = None,
+    management_key: bytes = DEFAULT_MANAGEMENT_KEY,
+    touch_policy: TOUCH_POLICY = TOUCH_POLICY.DEFAULT,
+    pin_policy: PIN_POLICY = PIN_POLICY.DEFAULT,
+    subject: str = "CN=Google OAuth DPoP Client",
+    device: Optional[Any] = None,
+) -> YubiKeyDPoPSigner:
+    """Generates a fresh asymmetric keypair directly inside a YubiKey PIV slot.
 
-        Args:
-            slot (Union[str, int, SLOT]): Target PIV slot (default: '9c').
-            serial (Optional[int]): Target YubiKey serial.
-            key_type (KEY_TYPE): Key algorithm type (default: ECCP256 for ES256).
-            pin (Optional[str]): PIV PIN (required for self-signed cert generation on slot 9c).
-            management_key (bytes): PIV management key for key generation.
-            touch_policy (TOUCH_POLICY): Touch requirement policy.
-            pin_policy (PIN_POLICY): PIN requirement policy.
-            subject (str): Certificate subject string.
-            device (Optional[Any]): Optional device override.
+    This is a standalone key-generation helper -- separate from the
+    signer class because DPoP signers should only *reference* existing
+    keys, not create them.
 
-        Returns:
-            YubiKeyDPoPSigner: A signer instance configured for the generated key.
-        """
-        if not _YKMAN_AVAILABLE:
-            raise YubiKeyDPoPError("yubikey-manager is not installed.")
+    Also generates a self-signed X.509 certificate and stores it in the slot so
+    that both the slot metadata and certificate are recognized across all tools.
 
-        parsed_slot = parse_slot(slot)
+    Args:
+        slot (Union[str, int, SLOT]): Target PIV slot (default: '9c').
+        serial (Optional[int]): Target YubiKey serial.
+        key_type (KEY_TYPE): Key algorithm type (default: ECCP256 for ES256).
+        pin (Optional[str]): PIV PIN (required for self-signed cert generation on slot 9c).
+        management_key (bytes): PIV management key for key generation.
+        touch_policy (TOUCH_POLICY): Touch requirement policy.
+        pin_policy (PIN_POLICY): PIN requirement policy.
+        subject (str): Certificate subject string.
+        device (Optional[Any]): Optional device override.
 
-        # Temporary signer to resolve device
-        temp = cls.__new__(cls)
-        dev, resolved_serial = temp._resolve_device(device, serial)
+    Returns:
+        YubiKeyDPoPSigner: A signer instance configured for the generated key.
+    """
+    if not _YKMAN_AVAILABLE:
+        raise YubiKeyDPoPError("yubikey-manager is not installed.")
 
-        with dev.open_connection(SmartCardConnection) as conn:
-            session = PivSession(conn)
-            logger.info("Authenticating with PIV management key...")
-            session.authenticate(management_key)
+    parsed_slot = parse_slot(slot)
 
-            logger.info(f"Generating on-chip {key_type.name} key in slot {parsed_slot.name}...")
-            public_key = session.generate_key(
-                parsed_slot,
-                key_type,
-                pin_policy=pin_policy,
-                touch_policy=touch_policy,
-            )
+    # Temporary signer to resolve device
+    temp = YubiKeyDPoPSigner.__new__(YubiKeyDPoPSigner)
+    dev, resolved_serial = temp._resolve_device(device, serial)
 
-            # Generate and put self-signed certificate so slot is universally recognized
-            now = datetime.datetime.now(datetime.timezone.utc)
-            cert_builder = (
-                x509.CertificateBuilder()
-                .public_key(public_key)
-                .subject_name(x509.Name([x509.NameAttribute(x509.NameOID.COMMON_NAME, subject)]))
-                .issuer_name(x509.Name([x509.NameAttribute(x509.NameOID.COMMON_NAME, subject)]))
-                .serial_number(x509.random_serial_number())
-                .not_valid_before(now)
-                .not_valid_after(now + datetime.timedelta(days=3650))
-            )
+    with dev.open_connection(SmartCardConnection) as conn:
+        session = PivSession(conn)
+        logger.info("Authenticating with PIV management key...")
+        session.authenticate(management_key)
 
-            cert = None
-            if pin:
-                try:
-                    # Slot 9c PIN_POLICY_ALWAYS requires PIN verification immediately prior to sign
-                    session.verify_pin(pin)
-                    from ykman.piv import sign_certificate_builder
-                    cert = sign_certificate_builder(
-                        session, parsed_slot, key_type, cert_builder, hashes.SHA256
-                    )
-                except Exception as exc:
-                    logger.debug(f"Hardware self-signing skipped ({exc}), generating cert via software builder...")
-
-            if cert is None:
-                signer_key = ec.generate_private_key(ec.SECP256R1())
-                cert = cert_builder.sign(signer_key, hashes.SHA256())
-
-            session.put_certificate(parsed_slot, cert)
-            logger.info(f"Successfully provisioned slot {parsed_slot.name} with certificate.")
-
-        return cls(
-            slot=parsed_slot,
-            serial=resolved_serial,
-            pin=pin,
-            device=dev,
+        logger.info(f"Generating on-chip {key_type.name} key in slot {parsed_slot.name}...")
+        public_key = session.generate_key(
+            parsed_slot,
+            key_type,
+            pin_policy=pin_policy,
+            touch_policy=touch_policy,
         )
+
+        # Generate and put self-signed certificate so slot is universally recognized
+        now = datetime.datetime.now(datetime.timezone.utc)
+        cert_builder = (
+            x509.CertificateBuilder()
+            .public_key(public_key)
+            .subject_name(x509.Name([x509.NameAttribute(x509.NameOID.COMMON_NAME, subject)]))
+            .issuer_name(x509.Name([x509.NameAttribute(x509.NameOID.COMMON_NAME, subject)]))
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now)
+            .not_valid_after(now + datetime.timedelta(days=3650))
+        )
+
+        cert = None
+        if pin:
+            try:
+                # Slot 9c PIN_POLICY_ALWAYS requires PIN verification immediately prior to sign
+                session.verify_pin(pin)
+                from ykman.piv import sign_certificate_builder
+                cert = sign_certificate_builder(
+                    session, parsed_slot, key_type, cert_builder, hashes.SHA256
+                )
+            except Exception as exc:
+                logger.debug(f"Hardware self-signing skipped ({exc}), generating cert via software builder...")
+
+        if cert is None:
+            signer_key = ec.generate_private_key(ec.SECP256R1())
+            cert = cert_builder.sign(signer_key, hashes.SHA256())
+
+        session.put_certificate(parsed_slot, cert)
+        logger.info(f"Successfully provisioned slot {parsed_slot.name} with certificate.")
+
+    return YubiKeyDPoPSigner(
+        slot=parsed_slot,
+        serial=resolved_serial,
+        pin=pin,
+        device=dev,
+    )
