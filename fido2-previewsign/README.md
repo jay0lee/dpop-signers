@@ -117,18 +117,6 @@ creds = DPoPCredentials.from_authorized_user_file(
 | Key generation | On-device via ARKG | On-device via PIV |
 | Maturity | Experimental preview | Stable |
 
-### Touch / biometric requirements across all signers
-
-| Signer | Touch per sign? | PIN/biometric per sign? | Unattended? |
-|--------|----------------|------------------------|-------------|
-| Software (PEM) | No | No | Yes |
-| YubiKey PIV (slot 9c) | No | Once per session | Yes |
-| macOS Secure Enclave | No | Optional (if created with `-t bio`) | Depends |
-| Windows CNG/TPM | No | No | Yes |
-| Linux TPM | No | No | Yes |
-| ECP | No | No | Yes |
-| **FIDO2 previewSign** | **Yes, every time** | Once per session | **No** |
-
 ## Constructor Parameters
 
 ```python

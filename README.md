@@ -50,6 +50,18 @@ creds = DPoPCredentials(
 )
 ```
 
+## Touch / Biometric / PIN Requirements
+
+| Signer | Touch per sign? | PIN/biometric per sign? | Unattended? |
+|--------|----------------|------------------------|-------------|
+| Software (PEM) | No | No | Yes |
+| YubiKey PIV (slot 9c) | No | Once per session | Yes |
+| FIDO2 previewSign | **Yes, every time** | Once per session | **No** |
+| macOS Secure Enclave | No | Optional (if created with `-t bio`) | Depends |
+| Windows CNG/TPM | No | No | Yes |
+| Linux TPM | No | No | Yes |
+| ECP | No | No | Yes |
+
 ## License
 
 Apache 2.0
