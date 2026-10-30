@@ -53,6 +53,7 @@ import sys
 from typing import Any, Mapping, Optional, Sequence, Tuple
 
 from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 from google.auth import _helpers
 from google.auth.dpop import DPoPSigner
 
@@ -389,10 +390,17 @@ class Fido2PreviewSignDPoPSigner(DPoPSigner):
                 f"FIDO2 previewSign assertion failed: {exc}"
             ) from exc
 
-        # Extract the signature from the extension outputs
+        # Extract the signature from the extension outputs.
+        # AssertionSelection.get_response() returns AuthenticationResponse,
+        # whose client_extension_results is an
+        # AuthenticationExtensionsClientOutputs (a Mapping).
+        #
+        # Use attribute access (preview_sign) rather than dict-style
+        # .get("previewSign") -- the Mapping.__getitem__ converts rich
+        # objects to plain dicts and base64-encodes bytes, whereas
+        # __getattr__ returns the raw _SignOutputs dataclass.
         response = result.get_response(0)
-        ext_results = response.extension_results or {}
-        sign_output = ext_results.get(PreviewSignExtension.NAME)
+        sign_output = response.client_extension_results.preview_sign
 
         if sign_output is None:
             raise Fido2PreviewSignError(
@@ -406,9 +414,11 @@ class Fido2PreviewSignDPoPSigner(DPoPSigner):
                 "previewSign extension returned no signature."
             )
 
-        # The previewSign extension returns a raw ECDSA signature
-        # (R || S, 64 bytes for P-256) -- exactly what JWS ES256 needs.
-        return signature
+        # The previewSign extension returns a DER-encoded ECDSA signature.
+        # JWS ES256 requires raw (R || S) format -- 64 bytes for P-256.
+        # Convert DER -> raw R||S.
+        r, s = decode_dss_signature(signature)
+        return r.to_bytes(32, "big") + s.to_bytes(32, "big")
 
     def to_dict(self) -> dict:
         """Serializes the signer state to a dictionary.
@@ -564,8 +574,10 @@ def generate_signing_credential(
             f"FIDO2 previewSign credential creation failed: {exc}"
         ) from exc
 
-    # Extract the credential ID from the attestation
-    auth_data = result.attestation_object.auth_data
+    # Extract the credential ID from the attestation.
+    # RegistrationResponse.response is AuthenticatorAttestationResponse,
+    # which holds the AttestationObject.
+    auth_data = result.response.attestation_object.auth_data
     cred_data = auth_data.credential_data
     if cred_data is None:
         raise Fido2PreviewSignError(
@@ -573,9 +585,15 @@ def generate_signing_credential(
         )
     credential_id = cred_data.credential_id
 
-    # Extract the previewSign extension outputs
-    ext_results = result.extension_results or {}
-    sign_output = ext_results.get(PreviewSignExtension.NAME)
+    # Extract the previewSign extension outputs.
+    # RegistrationResponse.client_extension_results is an
+    # AuthenticationExtensionsClientOutputs (a Mapping).
+    #
+    # Use attribute access (preview_sign) rather than dict-style
+    # .get("previewSign") -- the Mapping.__getitem__ converts rich
+    # objects to plain dicts and base64-encodes bytes, whereas
+    # __getattr__ returns the raw _SignOutputs dataclass.
+    sign_output = result.client_extension_results.preview_sign
 
     if sign_output is None or sign_output.generated_key is None:
         raise Fido2PreviewSignError(
