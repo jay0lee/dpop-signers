@@ -36,13 +36,19 @@ Key setup (TPM-backed, non-exportable)::
 
 Usage::
 
-    from windows_dpop import WindowsCNGDPoPSigner
+    from dpop_signer_windows_tpm import WindowsCNGDPoPSigner
 
-    # Find by subject name
+    # Find by subject name (Cert:\\CurrentUser\\My by default)
     signer = WindowsCNGDPoPSigner(subject="DPoP Client")
 
     # Or find by SHA-1 thumbprint (hex string)
     signer = WindowsCNGDPoPSigner(thumbprint="A1B2C3D4...")
+
+    # Or use the LocalMachine store (e.g. for SSH / scheduled tasks)
+    signer = WindowsCNGDPoPSigner(
+        subject="DPoP Client",
+        store_location="local_machine",
+    )
 """
 
 from __future__ import annotations
@@ -77,6 +83,8 @@ _ncrypt = ctypes.WinDLL("ncrypt", use_last_error=True)
 
 _CERT_STORE_PROV_SYSTEM = 10
 _CERT_SYSTEM_STORE_CURRENT_USER = 0x00010000
+_CERT_SYSTEM_STORE_LOCAL_MACHINE = 0x00020000
+_CERT_STORE_READONLY_FLAG = 0x00008000
 _X509_ASN_ENCODING = 0x00000001
 _PKCS_7_ASN_ENCODING = 0x00010000
 _ENCODING = _X509_ASN_ENCODING | _PKCS_7_ASN_ENCODING
@@ -87,6 +95,13 @@ _CERT_FIND_SHA1_HASH = 0x00010000
 _CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG = 0x00040000
 _CRYPT_ACQUIRE_CACHE_FLAG = 0x00000001
 _BCRYPT_PAD_PKCS1 = 0x00000002
+
+_STORE_LOCATIONS = {
+    "current_user": (_CERT_SYSTEM_STORE_CURRENT_USER, "CurrentUser", "current_user"),
+    "currentuser": (_CERT_SYSTEM_STORE_CURRENT_USER, "CurrentUser", "current_user"),
+    "local_machine": (_CERT_SYSTEM_STORE_LOCAL_MACHINE, "LocalMachine", "local_machine"),
+    "localmachine": (_CERT_SYSTEM_STORE_LOCAL_MACHINE, "LocalMachine", "local_machine"),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -169,22 +184,39 @@ _ncrypt.NCryptFreeObject.restype = wintypes.LONG
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _open_my_store():
-    """Open the CurrentUser\\MY certificate store."""
+def _resolve_store_location(store_location):
+    """Validate and resolve store_location to (flag, ps_name, canonical_name)."""
+    if not isinstance(store_location, str):
+        raise ValueError(
+            "Invalid store_location. Expected 'current_user' or 'local_machine'."
+        )
+    key = store_location.strip().lower().replace("-", "_").replace(" ", "_")
+    if key not in _STORE_LOCATIONS:
+        raise ValueError(
+            f"Invalid store_location {store_location!r}. "
+            "Expected 'current_user' or 'local_machine'."
+        )
+    return _STORE_LOCATIONS[key]
+
+
+def _open_my_store(store_location="current_user"):
+    """Open the CurrentUser\\MY or LocalMachine\\MY certificate store."""
+    store_flag, store_path, _ = _resolve_store_location(store_location)
     h_store = _crypt32.CertOpenStore(
         _CERT_STORE_PROV_SYSTEM,
         0, None,
-        _CERT_SYSTEM_STORE_CURRENT_USER,
+        store_flag | _CERT_STORE_READONLY_FLAG,
         ctypes.c_wchar_p("MY"),
     )
     if not h_store:
         raise WindowsCNGDPoPError(
-            f"CertOpenStore failed (error {ctypes.get_last_error()})."
+            f"CertOpenStore ({store_path}\\MY) failed "
+            f"(error {ctypes.get_last_error()})."
         )
     return h_store
 
 
-def _find_cert_by_subject(h_store, subject):
+def _find_cert_by_subject(h_store, subject, store_path="CurrentUser"):
     """Find a certificate by subject CN substring."""
     cert_ctx = _crypt32.CertFindCertificateInStore(
         h_store, _ENCODING, 0,
@@ -195,12 +227,12 @@ def _find_cert_by_subject(h_store, subject):
     if not cert_ctx:
         raise WindowsCNGDPoPError(
             f"No certificate found with subject containing '{subject}'. "
-            "Use Get-ChildItem Cert:\\CurrentUser\\My to list certificates."
+            f"Use Get-ChildItem Cert:\\{store_path}\\My to list certificates."
         )
     return cert_ctx
 
 
-def _find_cert_by_thumbprint(h_store, thumbprint_hex):
+def _find_cert_by_thumbprint(h_store, thumbprint_hex, store_path="CurrentUser"):
     """Find a certificate by SHA-1 thumbprint (hex string)."""
     thumb_bytes = bytes.fromhex(thumbprint_hex)
     blob_array = (ctypes.c_byte * len(thumb_bytes))(*thumb_bytes)
@@ -217,12 +249,12 @@ def _find_cert_by_thumbprint(h_store, thumbprint_hex):
     if not cert_ctx:
         raise WindowsCNGDPoPError(
             f"No certificate found with thumbprint '{thumbprint_hex}'. "
-            "Use Get-ChildItem Cert:\\CurrentUser\\My to list certificates."
+            f"Use Get-ChildItem Cert:\\{store_path}\\My to list certificates."
         )
     return cert_ctx
 
 
-def _acquire_ncrypt_key(cert_ctx):
+def _acquire_ncrypt_key(cert_ctx, store_path="CurrentUser"):
     """Acquire a CNG (NCrypt) key handle from a certificate context."""
     h_key = ctypes.c_void_p()
     key_spec = wintypes.DWORD()
@@ -237,10 +269,24 @@ def _acquire_ncrypt_key(cert_ctx):
         ctypes.byref(caller_free),
     )
     if not ok:
+        err = ctypes.get_last_error()
+        if err in (-2146893802, 0x80090016) and store_path == "CurrentUser":
+            hint = (
+                "If running over SSH or a scheduled task without an "
+                "interactive console login, CurrentUser DPAPI keys may be "
+                "locked; consider using store_location='local_machine' with a "
+                "LocalMachine certificate."
+            )
+        elif store_path == "LocalMachine":
+            hint = (
+                "Ensure the certificate has an associated private key and "
+                "the current user has Read permission on the private key."
+            )
+        else:
+            hint = "Ensure the certificate has an associated private key."
         raise WindowsCNGDPoPError(
             f"CryptAcquireCertificatePrivateKey failed "
-            f"(error {ctypes.get_last_error()}).  "
-            "Ensure the certificate has an associated private key."
+            f"(error {err}).  {hint}"
         )
     return h_key.value, caller_free.value
 
@@ -324,10 +370,15 @@ class WindowsCNGDPoPSigner(DPoPSigner):
 
     Args:
         subject (str): Certificate subject CN substring to search
-            for in ``Cert:\\CurrentUser\\My``.
+            for in the selected certificate store.
         thumbprint (str): SHA-1 thumbprint hex string (alternative
             to *subject*).
         key_id (Optional[str]): Custom identifier for this key.
+        store_location (str): Windows certificate store location to search:
+            ``"current_user"`` (default, ``Cert:\\CurrentUser\\My``) or
+            ``"local_machine"`` (``Cert:\\LocalMachine\\My``).  Use
+            ``"local_machine"`` for SSH or scheduled task sessions where
+            user DPAPI keys are unavailable without an interactive login.
     """
 
     def __init__(
@@ -335,28 +386,38 @@ class WindowsCNGDPoPSigner(DPoPSigner):
         subject=None,
         thumbprint=None,
         key_id=None,
+        store_location="current_user",
     ):
+        self._h_key = None
+        self._caller_free_key = False
+
         if not subject and not thumbprint:
             raise ValueError(
                 "Either 'subject' or 'thumbprint' must be provided."
             )
 
+        _, store_path, canonical_location = _resolve_store_location(
+            store_location
+        )
+        self._store_location = canonical_location
         self._custom_key_id = key_id
-        self._h_key = None
-        self._caller_free_key = False
 
         # Open cert store and find certificate
-        h_store = _open_my_store()
+        h_store = _open_my_store(canonical_location)
         try:
             if thumbprint:
-                cert_ctx = _find_cert_by_thumbprint(h_store, thumbprint)
+                cert_ctx = _find_cert_by_thumbprint(
+                    h_store, thumbprint, store_path=store_path,
+                )
             else:
-                cert_ctx = _find_cert_by_subject(h_store, subject)
+                cert_ctx = _find_cert_by_subject(
+                    h_store, subject, store_path=store_path,
+                )
 
             try:
                 # Acquire CNG key handle
                 self._h_key, self._caller_free_key = _acquire_ncrypt_key(
-                    cert_ctx
+                    cert_ctx, store_path=store_path,
                 )
 
                 # Extract public key from certificate DER
