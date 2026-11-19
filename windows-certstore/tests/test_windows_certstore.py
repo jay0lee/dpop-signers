@@ -51,12 +51,12 @@ def _load_windows_module(crypt32_mock, ncrypt_mock):
             return ncrypt_mock
         raise ValueError(f"Unexpected DLL: {name}")
 
-    sys.modules.pop("dpop_signer_windows_tpm", None)
+    sys.modules.pop("dpop_signer_windows_certstore", None)
     with (
         mock.patch.object(sys, "platform", "win32"),
         mock.patch.object(ctypes, "WinDLL", side_effect=fake_windll, create=True),
     ):
-        return importlib.import_module("dpop_signer_windows_tpm")
+        return importlib.import_module("dpop_signer_windows_certstore")
 
 
 def _make_cert_ptr(mod, der_bytes):
@@ -99,10 +99,13 @@ def _configure_success_mocks(crypt32_mock, ncrypt_mock, cert_ptr_factory):
 
 
 def test_import_fails_on_non_windows():
-    sys.modules.pop("dpop_signer_windows_tpm", None)
+    sys.modules.pop("dpop_signer_windows_certstore", None)
     with mock.patch.object(sys, "platform", "darwin"):
-        with pytest.raises(ImportError, match="only supported on Windows"):
-            importlib.import_module("dpop_signer_windows_tpm")
+        with pytest.raises(
+            ImportError,
+            match="dpop_signer_windows_certstore is only supported on Windows",
+        ):
+            importlib.import_module("dpop_signer_windows_certstore")
 
 
 @pytest.mark.parametrize(
@@ -131,7 +134,7 @@ def test_store_location_opens_expected_system_store(store_location, expected_fla
     if store_location is not None:
         kwargs["store_location"] = store_location
 
-    signer = mod.WindowsCNGDPoPSigner(**kwargs)
+    signer = mod.WindowsCertStoreDPoPSigner(**kwargs)
 
     call_args = crypt32_mock.CertOpenStore.call_args[0]
     assert call_args[0] == mod._CERT_STORE_PROV_SYSTEM
@@ -150,7 +153,9 @@ def test_invalid_store_location_raises_value_error(bad_location):
     mod = _load_windows_module(crypt32_mock, ncrypt_mock)
 
     with pytest.raises(ValueError, match="store_location"):
-        mod.WindowsCNGDPoPSigner(subject="DPoP Client", store_location=bad_location)
+        mod.WindowsCertStoreDPoPSigner(
+            subject="DPoP Client", store_location=bad_location
+        )
 
     crypt32_mock.CertOpenStore.assert_not_called()
 
@@ -158,7 +163,7 @@ def test_invalid_store_location_raises_value_error(bad_location):
 def test_missing_subject_and_thumbprint_raises_value_error():
     mod = _load_windows_module(mock.MagicMock(), mock.MagicMock())
     with pytest.raises(ValueError, match="subject.*thumbprint"):
-        mod.WindowsCNGDPoPSigner()
+        mod.WindowsCertStoreDPoPSigner()
 
 
 def test_cert_not_found_error_mentions_selected_store():
@@ -167,14 +172,24 @@ def test_cert_not_found_error_mentions_selected_store():
     crypt32_mock.CertFindCertificateInStore.return_value = None
     mod = _load_windows_module(crypt32_mock, mock.MagicMock())
 
-    with pytest.raises(mod.WindowsCNGDPoPError, match=r"Cert:\\LocalMachine\\My"):
-        mod.WindowsCNGDPoPSigner(subject="Missing", store_location="local_machine")
+    with pytest.raises(
+        mod.WindowsCertStoreDPoPError, match=r"Cert:\\LocalMachine\\My"
+    ):
+        mod.WindowsCertStoreDPoPSigner(
+            subject="Missing", store_location="local_machine"
+        )
 
-    with pytest.raises(mod.WindowsCNGDPoPError, match=r"Cert:\\LocalMachine\\My"):
-        mod.WindowsCNGDPoPSigner(thumbprint="AABBCCDD", store_location="local_machine")
+    with pytest.raises(
+        mod.WindowsCertStoreDPoPError, match=r"Cert:\\LocalMachine\\My"
+    ):
+        mod.WindowsCertStoreDPoPSigner(
+            thumbprint="AABBCCDD", store_location="local_machine"
+        )
 
-    with pytest.raises(mod.WindowsCNGDPoPError, match=r"Cert:\\CurrentUser\\My"):
-        mod.WindowsCNGDPoPSigner(subject="Missing")
+    with pytest.raises(
+        mod.WindowsCertStoreDPoPError, match=r"Cert:\\CurrentUser\\My"
+    ):
+        mod.WindowsCertStoreDPoPSigner(subject="Missing")
 
 
 def test_acquire_key_bad_keyset_over_ssh_includes_local_machine_hint():
@@ -184,12 +199,16 @@ def test_acquire_key_bad_keyset_over_ssh_includes_local_machine_hint():
     crypt32_mock = mock.MagicMock()
     crypt32_mock.CertOpenStore.return_value = 0x1001
     mod = _load_windows_module(crypt32_mock, mock.MagicMock())
-    crypt32_mock.CertFindCertificateInStore.return_value = _make_cert_ptr(mod, der_bytes)
+    crypt32_mock.CertFindCertificateInStore.return_value = _make_cert_ptr(
+        mod, der_bytes
+    )
     crypt32_mock.CryptAcquireCertificatePrivateKey.return_value = 0
 
-    with mock.patch.object(ctypes, "get_last_error", return_value=-2146893802, create=True):
-        with pytest.raises(mod.WindowsCNGDPoPError) as exc_info:
-            mod.WindowsCNGDPoPSigner(subject="DPoP Client")
+    with mock.patch.object(
+        ctypes, "get_last_error", return_value=-2146893802, create=True
+    ):
+        with pytest.raises(mod.WindowsCertStoreDPoPError) as exc_info:
+            mod.WindowsCertStoreDPoPSigner(subject="DPoP Client")
 
     assert "-2146893802" in str(exc_info.value)
     assert "store_location='local_machine'" in str(exc_info.value)
@@ -202,12 +221,14 @@ def test_acquire_key_failure_in_local_machine_mentions_read_permission():
     crypt32_mock = mock.MagicMock()
     crypt32_mock.CertOpenStore.return_value = 0x1001
     mod = _load_windows_module(crypt32_mock, mock.MagicMock())
-    crypt32_mock.CertFindCertificateInStore.return_value = _make_cert_ptr(mod, der_bytes)
+    crypt32_mock.CertFindCertificateInStore.return_value = _make_cert_ptr(
+        mod, der_bytes
+    )
     crypt32_mock.CryptAcquireCertificatePrivateKey.return_value = 0
 
     with mock.patch.object(ctypes, "get_last_error", return_value=5, create=True):
-        with pytest.raises(mod.WindowsCNGDPoPError, match="Read permission"):
-            mod.WindowsCNGDPoPSigner(
+        with pytest.raises(mod.WindowsCertStoreDPoPError, match="Read permission"):
+            mod.WindowsCertStoreDPoPSigner(
                 subject="DPoP Client",
                 store_location="local_machine",
             )
@@ -224,7 +245,7 @@ def test_rsa_thumbprint_signing_and_key_id():
         crypt32_mock, ncrypt_mock, lambda: _make_cert_ptr(mod, der_bytes)
     )
 
-    signer = mod.WindowsCNGDPoPSigner(
+    signer = mod.WindowsCertStoreDPoPSigner(
         thumbprint="00112233445566778899AABBCCDDEEFF00112233",
         key_id="win-machine-rsa",
         store_location="local_machine",

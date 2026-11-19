@@ -1,30 +1,32 @@
-# dpop-signer-windows-tpm
+# dpop-signer-windows-certstore
 
-Windows CNG/TPM DPoP signer for google-auth.
+Windows Certificate Store DPoP signer for google-auth.
 
-Signs DPoP proof JWTs using a private key in the Windows Certificate Store,
-backed by the platform TPM. No additional pip dependencies — uses ctypes to
-call CNG (ncrypt) directly.
+Signs DPoP proof JWTs using a certificate's private key stored in the Windows
+Certificate Store (`Cert:\CurrentUser\My` or `Cert:\LocalMachine\My`). Works
+transparently whether Windows backs the key with the hardware TPM (Platform
+Crypto Provider), software key storage, or a smart card. No additional pip
+dependencies — uses ctypes to call Windows `crypt32` and `ncrypt` APIs directly.
 
 ## Install
 
 ```bash
-pip install dpop-signer-windows-tpm
+pip install dpop-signer-windows-certstore
 ```
 
 ## Usage
 
 ```python
-from dpop_signer_windows_tpm import WindowsCNGDPoPSigner
+from dpop_signer_windows_certstore import WindowsCertStoreDPoPSigner
 
 # Find certificate by subject name
-signer = WindowsCNGDPoPSigner(subject="DPoP Signing")
+signer = WindowsCertStoreDPoPSigner(subject="DPoP Signing")
 
 # Or by SHA-1 thumbprint
-signer = WindowsCNGDPoPSigner(thumbprint="a1b2c3d4...")
+signer = WindowsCertStoreDPoPSigner(thumbprint="a1b2c3d4...")
 
 # Or look in Cert:\LocalMachine\My (for SSH / scheduled task sessions)
-signer = WindowsCNGDPoPSigner(
+signer = WindowsCertStoreDPoPSigner(
     subject="DPoP Signing",
     store_location="local_machine",
 )
@@ -63,13 +65,13 @@ prefix). You can also use the certificate's `Thumbprint` shown in the verify
 step above:
 
 ```python
-from dpop_signer_windows_tpm import WindowsCNGDPoPSigner
+from dpop_signer_windows_certstore import WindowsCertStoreDPoPSigner
 
 # By subject — matches -Subject "CN=DPoP Signing" above
-signer = WindowsCNGDPoPSigner(subject="DPoP Signing")
+signer = WindowsCertStoreDPoPSigner(subject="DPoP Signing")
 
 # Or by thumbprint from the verify output
-signer = WindowsCNGDPoPSigner(thumbprint="A1B2C3D4...")
+signer = WindowsCertStoreDPoPSigner(thumbprint="A1B2C3D4...")
 ```
 
 ### Confirm TPM backing
@@ -118,7 +120,7 @@ New-SelfSignedCertificate `
 3. Pass `store_location="local_machine"`:
 
 ```python
-signer = WindowsCNGDPoPSigner(
+signer = WindowsCertStoreDPoPSigner(
     subject="DPoP Signing",
     store_location="local_machine",
 )
@@ -134,9 +136,9 @@ Get-ChildItem Cert:\CurrentUser\My |
 
 ### Notes
 
-- The certificate itself is not used for DPoP — it's just the container
-  Windows uses to associate with the TPM-backed private key.
-- If your machine does not have a TPM, CNG will fall back to software key
+- The certificate itself is not used for DPoP — it's the container Windows
+  uses to associate with the managed private key (whether hardware TPM, software
+  key storage, or smart card).
+- If your machine does not have a TPM, Windows falls back to software key
   storage. To verify TPM backing, check the provider name as shown above.
-- Supported algorithms: ECDSA P-256 (ES256), ECDSA P-384 (ES384), RSA 2048+
-  (RS256).
+- Supported algorithms: ECDSA P-256 (`ES256`) and RSA 2048+ (`RS256`).

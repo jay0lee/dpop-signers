@@ -12,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Windows CNG / TPM DPoP Signer (RFC 9449).
+"""Windows Certificate Store DPoP Signer (RFC 9449).
 
 Uses ctypes to call ``crypt32.dll`` and ``ncrypt.dll`` directly.
-No pip dependencies beyond google-auth.  TPM-backed keys are
-transparently supported -- CNG routes signing to the TPM when the
-key was provisioned with the Microsoft Platform Crypto Provider.
+No pip dependencies beyond google-auth.  Works transparently with any
+Windows-managed private key in the Certificate Store -- TPM-backed
+(Microsoft Platform Crypto Provider), software key storage, or smart card.
 
 Supports ES256 (P-256 ECDSA) and RS256 (RSA PKCS#1 v1.5).
 
@@ -36,16 +36,16 @@ Key setup (TPM-backed, non-exportable)::
 
 Usage::
 
-    from dpop_signer_windows_tpm import WindowsCNGDPoPSigner
+    from dpop_signer_windows_certstore import WindowsCertStoreDPoPSigner
 
     # Find by subject name (Cert:\\CurrentUser\\My by default)
-    signer = WindowsCNGDPoPSigner(subject="DPoP Client")
+    signer = WindowsCertStoreDPoPSigner(subject="DPoP Client")
 
     # Or find by SHA-1 thumbprint (hex string)
-    signer = WindowsCNGDPoPSigner(thumbprint="A1B2C3D4...")
+    signer = WindowsCertStoreDPoPSigner(thumbprint="A1B2C3D4...")
 
     # Or use the LocalMachine store (e.g. for SSH / scheduled tasks)
-    signer = WindowsCNGDPoPSigner(
+    signer = WindowsCertStoreDPoPSigner(
         subject="DPoP Client",
         store_location="local_machine",
     )
@@ -61,7 +61,7 @@ import logging
 import sys
 
 if sys.platform != "win32":
-    raise ImportError("dpop_signer_windows_tpm is only supported on Windows")
+    raise ImportError("dpop_signer_windows_certstore is only supported on Windows")
 
 from google.auth.dpop import DPoPSigner
 
@@ -208,7 +208,7 @@ def _open_my_store(store_location="current_user"):
         ctypes.c_wchar_p("MY"),
     )
     if not h_store:
-        raise WindowsCNGDPoPError(
+        raise WindowsCertStoreDPoPError(
             f"CertOpenStore ({store_path}\\MY) failed "
             f"(error {ctypes.get_last_error()})."
         )
@@ -224,7 +224,7 @@ def _find_cert_by_subject(h_store, subject, store_path="CurrentUser"):
         None,
     )
     if not cert_ctx:
-        raise WindowsCNGDPoPError(
+        raise WindowsCertStoreDPoPError(
             f"No certificate found with subject containing '{subject}'. "
             f"Use Get-ChildItem Cert:\\{store_path}\\My to list certificates."
         )
@@ -246,7 +246,7 @@ def _find_cert_by_thumbprint(h_store, thumbprint_hex, store_path="CurrentUser"):
         None,
     )
     if not cert_ctx:
-        raise WindowsCNGDPoPError(
+        raise WindowsCertStoreDPoPError(
             f"No certificate found with thumbprint '{thumbprint_hex}'. "
             f"Use Get-ChildItem Cert:\\{store_path}\\My to list certificates."
         )
@@ -283,7 +283,7 @@ def _acquire_ncrypt_key(cert_ctx, store_path="CurrentUser"):
             )
         else:
             hint = "Ensure the certificate has an associated private key."
-        raise WindowsCNGDPoPError(
+        raise WindowsCertStoreDPoPError(
             f"CryptAcquireCertificatePrivateKey failed "
             f"(error {err}).  {hint}"
         )
@@ -318,7 +318,7 @@ def _public_key_to_jwk(public_key):
     if isinstance(public_key, ec.EllipticCurvePublicKey):
         curve = public_key.curve
         if not isinstance(curve, ec.SECP256R1):
-            raise WindowsCNGDPoPError(
+            raise WindowsCertStoreDPoPError(
                 f"Unsupported EC curve for DPoP: {curve.name}. "
                 "Only P-256 (ES256) and RSA (RS256) are supported."
             )
@@ -348,7 +348,7 @@ def _public_key_to_jwk(public_key):
         }
         return "RS256", jwk
 
-    raise WindowsCNGDPoPError(
+    raise WindowsCertStoreDPoPError(
         f"Unsupported key type: {type(public_key).__name__}"
     )
 
@@ -357,18 +357,18 @@ def _public_key_to_jwk(public_key):
 # Public API
 # ---------------------------------------------------------------------------
 
-class WindowsCNGDPoPError(Exception):
-    """Error raised by Windows CNG DPoP operations."""
+class WindowsCertStoreDPoPError(Exception):
+    """Error raised by Windows Certificate Store DPoP operations."""
     pass
 
 
-class WindowsCNGDPoPSigner(DPoPSigner):
-    """DPoP signer backed by Windows CNG / TPM.
+class WindowsCertStoreDPoPSigner(DPoPSigner):
+    """DPoP signer backed by the Windows Certificate Store.
 
     Uses ctypes to call ``crypt32.dll`` and ``ncrypt.dll``.
-    No pip dependencies beyond google-auth.  TPM-backed keys are
-    transparently supported -- CNG routes to the TPM automatically
-    when the key was created with the Platform Crypto Provider.
+    No pip dependencies beyond google-auth.  Works transparently whether
+    Windows backs the certificate's private key with a TPM (Platform Crypto
+    Provider), software key storage, or a smart card.
 
     Supports ES256 (P-256) and RS256 (RSA).
 
@@ -435,7 +435,7 @@ class WindowsCNGDPoPSigner(DPoPSigner):
             _crypt32.CertCloseStore(h_store, 0)
 
         logger.info(
-            "Windows CNG DPoP signer initialized: algorithm=%s, "
+            "Windows Certificate Store DPoP signer initialized: algorithm=%s, "
             "thumbprint=%s...",
             self._algorithm, self.thumbprint[:16],
         )
@@ -456,11 +456,11 @@ class WindowsCNGDPoPSigner(DPoPSigner):
         return self._custom_key_id
 
     def sign(self, data):
-        """Signs data using CNG ``NCryptSignHash``.
+        """Signs data using Windows CNG ``NCryptSignHash``.
 
         The input is hashed with SHA-256 before signing.  For ECDSA,
-        CNG returns raw R||S bytes (exactly what JWS ES256 requires --
-        no conversion needed).  For RSA, CNG returns PKCS#1 v1.5
+        ``NCryptSignHash`` returns raw R||S bytes (exactly what JWS ES256
+        requires -- no conversion needed).  For RSA, it returns PKCS#1 v1.5
         signature bytes.
 
         Args:
@@ -470,7 +470,7 @@ class WindowsCNGDPoPSigner(DPoPSigner):
             bytes: The signature bytes.
 
         Raises:
-            WindowsCNGDPoPError: If signing fails.
+            WindowsCertStoreDPoPError: If signing fails.
         """
         digest = hashlib.sha256(data).digest()
 
@@ -496,7 +496,7 @@ class WindowsCNGDPoPSigner(DPoPSigner):
             flags,
         )
         if status != 0:
-            raise WindowsCNGDPoPError(
+            raise WindowsCertStoreDPoPError(
                 f"NCryptSignHash size query failed (0x{status:08X})."
             )
 
@@ -511,7 +511,7 @@ class WindowsCNGDPoPSigner(DPoPSigner):
             flags,
         )
         if status != 0:
-            raise WindowsCNGDPoPError(
+            raise WindowsCertStoreDPoPError(
                 f"NCryptSignHash failed (0x{status:08X})."
             )
 
