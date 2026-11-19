@@ -1,0 +1,407 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  lint-and-unit:
+    name: Lint & Unit Tests (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-latest]
+        python-version: ["3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies and signer packages
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest flake8 pyjwt cryptography
+          python -m pip install "google-auth @ git+https://github.com/jay0lee/google-cloud-python.git@main#subdirectory=packages/google-auth"
+          python -c "import google.auth.dpop; print('google.auth.dpop OK')"
+
+      - name: Lint with flake8
+        shell: bash
+        run: |
+          flake8 ecp/src ecp/tests \
+                 ephemeral/src ephemeral/tests \
+                 fido2-previewsign/src fido2-previewsign/tests \
+                 linux-tpm/src linux-tpm/tests \
+                 macos-secureenclave/src macos-secureenclave/tests \
+                 pkcs11/src pkcs11/tests \
+                 windows-certstore/src windows-certstore/tests \
+                 --max-line-length=100
+
+      - name: Run unit tests per package
+        shell: bash
+        run: |
+          set -e
+          for pkg in ecp ephemeral fido2-previewsign linux-tpm macos-secureenclave pkcs11 windows-certstore; do
+            echo "=== Testing $pkg ==="
+            PYTHONPATH="$pkg/src" pytest "$pkg/tests"
+          done
+
+  e2e-linux:
+    name: E2E (Ubuntu - ephemeral, pkcs11/SoftHSM2, linux-tpm/swtpm, ecp)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system TPM2, SoftHSM2, OpenSC, and compiler tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc libssl-dev pkg-config \
+            swtpm tpm2-tools libtss2-dev \
+            softhsm2 opensc
+
+      - name: Install Python dependencies and signers
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyjwt cryptography python-pkcs11 tpm2-pytss
+          python -m pip install "google-auth @ git+https://github.com/jay0lee/google-cloud-python.git@main#subdirectory=packages/google-auth"
+          python -m pip install --no-deps ./ephemeral ./pkcs11 ./linux-tpm ./ecp
+
+      - name: E2E ephemeral
+        run: |
+          python - <<'EOF'
+          import jwt
+          from dpop_signer_ephemeral import EphemeralDPoPSigner
+
+          signer = EphemeralDPoPSigner()
+          proof = signer.create_proof("POST", "https://oauth2.googleapis.com/token")
+          header = jwt.get_unverified_header(proof)
+          claims = jwt.decode(
+              proof, jwt.PyJWK.from_dict(header["jwk"]).key, algorithms=["ES256"]
+          )
+          assert claims["htm"] == "POST"
+          print("Ephemeral E2E OK:", signer.thumbprint)
+          EOF
+
+      - name: E2E pkcs11 (SoftHSM2 EC & RSA)
+        run: |
+          SOFTHSM_LIB="/usr/lib/softhsm/libsofthsm2.so"
+          if [ ! -f "$SOFTHSM_LIB" ]; then
+            SOFTHSM_LIB="$(find /usr/lib -name libsofthsm2.so | head -n 1)"
+          fi
+          mkdir -p /tmp/softhsm-tokens
+          printf "directories.tokendir = /tmp/softhsm-tokens\nobjectstore.backend = file\n" > /tmp/softhsm2.conf
+          export SOFTHSM2_CONF=/tmp/softhsm2.conf
+
+          softhsm2-util --init-token --free --label dpop-ci --so-pin 123456 --pin 1234
+          pkcs11-tool --module "$SOFTHSM_LIB" --login --pin 1234 \
+            --keypairgen --key-type EC:prime256v1 --label dpop-ec --id 01
+          pkcs11-tool --module "$SOFTHSM_LIB" --login --pin 1234 \
+            --keypairgen --key-type rsa:2048 --label dpop-rsa --id 02
+
+          SOFTHSM_LIB="$SOFTHSM_LIB" python - <<'EOF'
+          import os
+          import jwt
+          from dpop_signer_pkcs11 import PKCS11DPoPSigner
+
+          lib = os.environ["SOFTHSM_LIB"]
+          for obj, expected_alg in [("dpop-ec", "ES256"), ("dpop-rsa", "RS256")]:
+              uri = f"pkcs11:token=dpop-ci;object={obj}?module-path={lib}&pin-value=1234"
+              with PKCS11DPoPSigner(uri) as signer:
+                  assert signer.algorithm == expected_alg
+                  proof = signer.create_proof("POST", "https://oauth2.googleapis.com/token")
+                  header = jwt.get_unverified_header(proof)
+                  claims = jwt.decode(
+                      proof,
+                      jwt.PyJWK.from_dict(header["jwk"]).key,
+                      algorithms=[expected_alg],
+                  )
+                  assert claims["htm"] == "POST"
+                  print(f"PKCS11 {expected_alg} E2E OK:", signer.thumbprint)
+          EOF
+
+      - name: Start swtpm simulator and E2E linux-tpm (ES256 & RS256)
+        run: |
+          mkdir -p /tmp/vtpm
+          swtpm socket \
+            --tpmstate dir=/tmp/vtpm \
+            --tpm2 \
+            --server type=tcp,port=2321 \
+            --ctrl type=tcp,port=2322 \
+            --flags not-need-init,startup-clear \
+            --daemon
+          sleep 1
+
+          export TPM2TOOLS_TCTI="swtpm:host=127.0.0.1,port=2321"
+          tpm2_createprimary -C o -g sha256 -G ecc256 -c /tmp/primary_ec.ctx \
+            -a 'fixedtpm|fixedparent|sensitivedataorigin|userwithauth|sign'
+          tpm2_evictcontrol -C o -c /tmp/primary_ec.ctx 0x81000001
+
+          tpm2_createprimary -C o -g sha256 -G rsa2048 -c /tmp/primary_rsa.ctx \
+            -a 'fixedtpm|fixedparent|sensitivedataorigin|userwithauth|sign'
+          tpm2_evictcontrol -C o -c /tmp/primary_rsa.ctx 0x81000002
+
+          python - <<'EOF'
+          import jwt
+          from dpop_signer_linux_tpm import LinuxTPMDPoPSigner
+
+          tcti = "swtpm:host=127.0.0.1,port=2321"
+          for handle, expected_alg in [(0x81000001, "ES256"), (0x81000002, "RS256")]:
+              signer = LinuxTPMDPoPSigner(handle=handle, tcti=tcti)
+              assert signer.algorithm == expected_alg
+              proof = signer.create_proof("POST", "https://oauth2.googleapis.com/token")
+              header = jwt.get_unverified_header(proof)
+              claims = jwt.decode(
+                  proof,
+                  jwt.PyJWK.from_dict(header["jwk"]).key,
+                  algorithms=[expected_alg],
+              )
+              assert claims["htm"] == "POST"
+              print(f"LinuxTPM {expected_alg} E2E OK:", signer.thumbprint)
+          EOF
+
+      - name: E2E ecp (ctypes shared library shim)
+        run: |
+          cat > /tmp/ecp_test_shim.c <<'CEOF'
+          #include <openssl/evp.h>
+          #include <openssl/pem.h>
+          #include <openssl/x509.h>
+          #include <openssl/ec.h>
+          #include <string.h>
+
+          static EVP_PKEY *g_key = NULL;
+          static char g_cert_pem[4096];
+          static int g_cert_len = 0;
+
+          static void ensure_init(void) {
+              if (g_key) return;
+              EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, NULL);
+              EVP_PKEY_keygen_init(pctx);
+              EVP_PKEY_CTX_set_ec_paramgen_curve_nid(pctx, NID_X9_62_prime256v1);
+              EVP_PKEY_keygen(pctx, &g_key);
+              EVP_PKEY_CTX_free(pctx);
+
+              X509 *x = X509_new();
+              X509_set_version(x, 2);
+              ASN1_INTEGER_set(X509_get_serialNumber(x), 1);
+              X509_gmtime_adj(X509_get_notBefore(x), 0);
+              X509_gmtime_adj(X509_get_notAfter(x), 3600);
+              X509_set_pubkey(x, g_key);
+              X509_NAME *name = X509_get_subject_name(x);
+              X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, (unsigned char *)"ECP CI", -1, -1, 0);
+              X509_set_issuer_name(x, name);
+              X509_sign(x, g_key, EVP_sha256());
+
+              BIO *bio = BIO_new(BIO_s_mem());
+              PEM_write_bio_X509(bio, x);
+              g_cert_len = BIO_read(bio, g_cert_pem, sizeof(g_cert_pem));
+              BIO_free(bio);
+              X509_free(x);
+          }
+
+          int GetCertPemForPython(const char *cfg, unsigned char *buf, int buf_len) {
+              (void)cfg;
+              ensure_init();
+              if (!buf) return g_cert_len;
+              int n = buf_len < g_cert_len ? buf_len : g_cert_len;
+              memcpy(buf, g_cert_pem, n);
+              return n;
+          }
+
+          int SignForPython(const char *cfg, const unsigned char *digest, int digest_len,
+                            unsigned char *sig, int sig_len) {
+              (void)cfg;
+              ensure_init();
+              EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(g_key, NULL);
+              size_t out_len = (size_t)sig_len;
+              if (EVP_PKEY_sign_init(ctx) <= 0 ||
+                  EVP_PKEY_CTX_set_signature_md(ctx, EVP_sha256()) <= 0 ||
+                  EVP_PKEY_sign(ctx, sig, &out_len, digest, (size_t)digest_len) <= 0) {
+                  EVP_PKEY_CTX_free(ctx);
+                  return 0;
+              }
+              EVP_PKEY_CTX_free(ctx);
+              return (int)out_len;
+          }
+          CEOF
+          gcc -shared -fPIC -O2 /tmp/ecp_test_shim.c -o /tmp/libecp_shim.so -lcrypto
+          printf '{"libs": {"ecp_client": "/tmp/libecp_shim.so"}}\n' > /tmp/ecp_ci_config.json
+
+          python - <<'EOF'
+          import jwt
+          from dpop_signer_ecp import ECPDPoPSigner
+
+          signer = ECPDPoPSigner(config_path="/tmp/ecp_ci_config.json")
+          assert signer.algorithm == "ES256"
+          proof = signer.create_proof("POST", "https://oauth2.googleapis.com/token")
+          header = jwt.get_unverified_header(proof)
+          claims = jwt.decode(
+              proof, jwt.PyJWK.from_dict(header["jwk"]).key, algorithms=["ES256"]
+          )
+          assert claims["htm"] == "POST"
+          print("ECP E2E OK:", signer.thumbprint)
+          EOF
+
+  e2e-macos:
+    name: E2E (macOS 15 - Secure Enclave, pkcs11/SoftHSM2)
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Homebrew softhsm and opensc
+        run: brew install softhsm opensc
+
+      - name: Install Python dependencies and signers
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyjwt cryptography python-pkcs11
+          python -m pip install "google-auth @ git+https://github.com/jay0lee/google-cloud-python.git@main#subdirectory=packages/google-auth"
+          python -m pip install --no-deps ./macos-secureenclave ./pkcs11
+
+      - name: E2E macOS Secure Enclave (sc_auth CTK identity)
+        run: |
+          LABEL="dpop-ci-${GITHUB_RUN_ID}"
+          echo "SE_LABEL=$LABEL" >> "$GITHUB_ENV"
+          sc_auth create-ctk-identity -l "$LABEL" -k p-256-ne -t none
+          sc_auth list-ctk-identities
+
+          python - <<'EOF'
+          import os
+          import jwt
+          from dpop_signer_macos_secureenclave import SecureEnclaveDPoPSigner
+
+          signer = SecureEnclaveDPoPSigner(label=os.environ["SE_LABEL"])
+          assert signer.algorithm == "ES256"
+          proof = signer.create_proof("POST", "https://oauth2.googleapis.com/token")
+          header = jwt.get_unverified_header(proof)
+          claims = jwt.decode(
+              proof, jwt.PyJWK.from_dict(header["jwk"]).key, algorithms=["ES256"]
+          )
+          assert claims["htm"] == "POST"
+          print("macOS Secure Enclave E2E OK:", signer.thumbprint)
+          EOF
+
+      - name: Cleanup macOS Secure Enclave CTK identity
+        if: always()
+        run: |
+          HASH=$(sc_auth list-ctk-identities | awk -v lbl="$SE_LABEL" '$0 ~ lbl {print $2}' | head -n 1)
+          if [ -n "$HASH" ]; then
+            sc_auth delete-ctk-identity -h "$HASH" || true
+          fi
+
+      - name: E2E pkcs11 (Homebrew SoftHSM2)
+        run: |
+          SOFTHSM_LIB="$(brew --prefix)/lib/softhsm/libsofthsm2.so"
+          mkdir -p /tmp/softhsm-tokens
+          printf "directories.tokendir = /tmp/softhsm-tokens\nobjectstore.backend = file\n" > /tmp/softhsm2.conf
+          export SOFTHSM2_CONF=/tmp/softhsm2.conf
+
+          softhsm2-util --init-token --free --label dpop-ci --so-pin 123456 --pin 1234
+          pkcs11-tool --module "$SOFTHSM_LIB" --login --pin 1234 \
+            --keypairgen --key-type EC:prime256v1 --label dpop-ec --id 01
+
+          SOFTHSM_LIB="$SOFTHSM_LIB" python - <<'EOF'
+          import os
+          import jwt
+          from dpop_signer_pkcs11 import PKCS11DPoPSigner
+
+          lib = os.environ["SOFTHSM_LIB"]
+          uri = f"pkcs11:token=dpop-ci;object=dpop-ec?module-path={lib}&pin-value=1234"
+          with PKCS11DPoPSigner(uri) as signer:
+              assert signer.algorithm == "ES256"
+              proof = signer.create_proof("POST", "https://oauth2.googleapis.com/token")
+              header = jwt.get_unverified_header(proof)
+              claims = jwt.decode(
+                  proof, jwt.PyJWK.from_dict(header["jwk"]).key, algorithms=["ES256"]
+              )
+              assert claims["htm"] == "POST"
+              print("macOS PKCS11 E2E OK:", signer.thumbprint)
+          EOF
+
+  e2e-windows:
+    name: E2E (Windows - Certificate Store ES256 & RS256)
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies and windows-certstore
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyjwt cryptography
+          python -m pip install "google-auth @ git+https://github.com/jay0lee/google-cloud-python.git@main#subdirectory=packages/google-auth"
+          python -m pip install --no-deps ./windows-certstore
+
+      - name: Provision test certificates in Cert:\CurrentUser\My and test E2E
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ecSubject = "DPoP CI EC $env:GITHUB_RUN_ID"
+          $rsaSubject = "DPoP CI RSA $env:GITHUB_RUN_ID"
+          New-SelfSignedCertificate `
+            -Subject "CN=$ecSubject" `
+            -KeyAlgorithm ECDSA_nistP256 `
+            -Provider "Microsoft Software Key Storage Provider" `
+            -CertStoreLocation "Cert:\CurrentUser\My" `
+            -NotAfter (Get-Date).AddDays(1) | Out-Null
+          New-SelfSignedCertificate `
+            -Subject "CN=$rsaSubject" `
+            -KeyAlgorithm RSA `
+            -KeyLength 2048 `
+            -Provider "Microsoft Software Key Storage Provider" `
+            -CertStoreLocation "Cert:\CurrentUser\My" `
+            -NotAfter (Get-Date).AddDays(1) | Out-Null
+
+          $env:DPOP_EC_SUBJECT = $ecSubject
+          $env:DPOP_RSA_SUBJECT = $rsaSubject
+          python -c @"
+          import os, jwt
+          from dpop_signer_windows_certstore import WindowsCertStoreDPoPSigner
+
+          for env_key, expected_alg in [
+              ("DPOP_EC_SUBJECT", "ES256"),
+              ("DPOP_RSA_SUBJECT", "RS256"),
+          ]:
+              signer = WindowsCertStoreDPoPSigner(subject=os.environ[env_key])
+              assert signer.algorithm == expected_alg
+              proof = signer.create_proof("POST", "https://oauth2.googleapis.com/token")
+              header = jwt.get_unverified_header(proof)
+              claims = jwt.decode(
+                  proof,
+                  jwt.PyJWK.from_dict(header["jwk"]).key,
+                  algorithms=[expected_alg],
+              )
+              assert claims["htm"] == "POST"
+              print(f"Windows CertStore {expected_alg} E2E OK:", signer.thumbprint)
+          "@
+
+      - name: Cleanup test certificates from Cert:\CurrentUser\My
+        if: always()
+        shell: pwsh
+        run: |
+          Get-ChildItem Cert:\CurrentUser\My |
+            Where-Object { $_.Subject -like "*DPoP CI * $env:GITHUB_RUN_ID*" } |
+            Remove-Item -ErrorAction SilentlyContinue
