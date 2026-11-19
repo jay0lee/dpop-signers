@@ -32,17 +32,17 @@ pip install "dpop-signer-yubikey @ git+https://github.com/jay0lee/dpop-signers.g
 ## Usage
 
 Every signer implements the `google.auth.dpop.DPoPSigner` interface and plugs
-directly into `DPoPCredentials`:
+directly into `DPoPCredentials` (or pass a callable factory like
+`lambda: YubiKeyDPoPSigner(...)` to defer hardware I/O until token refresh)
+and `google_auth_oauthlib.flow.InstalledAppFlow`:
 
 ```python
 from dpop_signer_yubikey import YubiKeyDPoPSigner
 from google.oauth2.dpop_credentials import DPoPCredentials
 
-signer = YubiKeyDPoPSigner(pin="123456")
-
 creds = DPoPCredentials(
     token=None,
-    dpop_signer=signer,
+    dpop_signer=lambda: YubiKeyDPoPSigner(pin="123456"),
     refresh_token="...",
     token_uri="https://oauth2.googleapis.com/token",
     client_id="...",

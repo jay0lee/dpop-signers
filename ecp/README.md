@@ -3,8 +3,8 @@
 Google Enterprise Certificate Proxy (ECP) DPoP signer for google-auth.
 
 Signs DPoP proof JWTs using the enterprise certificate managed by Google's ECP
-binary. No additional pip dependencies — communicates with the ECP helper via
-subprocess.
+signer shared library (`ecp_client`). No additional pip dependencies — calls
+the ECP signer library directly via `ctypes`.
 
 ## Install
 

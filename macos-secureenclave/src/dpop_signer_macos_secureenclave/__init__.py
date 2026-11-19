@@ -30,22 +30,21 @@ Key setup (macOS 15+, Secure Enclave)::
 
 Usage::
 
-    from macos_dpop import SecureEnclaveDPoPSigner
+    from dpop_signer_macos_secureenclave import SecureEnclaveDPoPSigner
 
     signer = SecureEnclaveDPoPSigner(label="com.apple.security.ctkidentity.XXXXXX")
 """
 
 from __future__ import annotations
 
+import base64
 import ctypes
 import logging
 import sys
-from typing import Any, Mapping, Optional
 
 if sys.platform != "darwin":
-    raise ImportError("macos_dpop is only supported on macOS")
+    raise ImportError("dpop_signer_macos_secureenclave is only supported on macOS")
 
-from google.auth import _helpers
 from google.auth.dpop import DPoPSigner, der_to_raw_ecdsa_signature
 
 logger = logging.getLogger(__name__)
@@ -390,8 +389,8 @@ class SecureEnclaveDPoPSigner(DPoPSigner):
         return {
             "kty": "EC",
             "crv": "P-256",
-            "x": _helpers.unpadded_urlsafe_b64encode(x_bytes).decode("ascii"),
-            "y": _helpers.unpadded_urlsafe_b64encode(y_bytes).decode("ascii"),
+            "x": base64.urlsafe_b64encode(x_bytes).rstrip(b"=").decode("ascii"),
+            "y": base64.urlsafe_b64encode(y_bytes).rstrip(b"=").decode("ascii"),
         }
 
     # -- DPoPSigner interface --

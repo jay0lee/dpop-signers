@@ -53,17 +53,16 @@ Usage::
 
 from __future__ import annotations
 
+import base64
 import ctypes
 import ctypes.wintypes as wintypes
 import hashlib
 import logging
 import sys
-from typing import Any, Mapping, Optional
 
 if sys.platform != "win32":
-    raise ImportError("windows_dpop is only supported on Windows")
+    raise ImportError("dpop_signer_windows_tpm is only supported on Windows")
 
-from google.auth import _helpers
 from google.auth.dpop import DPoPSigner
 
 logger = logging.getLogger(__name__)
@@ -307,6 +306,11 @@ def _extract_public_key_from_cert(cert_ctx):
     return cert.public_key()
 
 
+def _b64url_encode(data):
+    """Encodes bytes as unpadded URL-safe base64 ASCII text."""
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
 def _public_key_to_jwk(public_key):
     """Convert a cryptography public key to (algorithm, JWK dict)."""
     from cryptography.hazmat.primitives.asymmetric import ec, rsa
@@ -324,8 +328,8 @@ def _public_key_to_jwk(public_key):
         jwk = {
             "kty": "EC",
             "crv": "P-256",
-            "x": _helpers.unpadded_urlsafe_b64encode(x_bytes).decode("ascii"),
-            "y": _helpers.unpadded_urlsafe_b64encode(y_bytes).decode("ascii"),
+            "x": _b64url_encode(x_bytes),
+            "y": _b64url_encode(y_bytes),
         }
         return "ES256", jwk
 
@@ -339,8 +343,8 @@ def _public_key_to_jwk(public_key):
         )
         jwk = {
             "kty": "RSA",
-            "n": _helpers.unpadded_urlsafe_b64encode(n_bytes).decode("ascii"),
-            "e": _helpers.unpadded_urlsafe_b64encode(e_bytes).decode("ascii"),
+            "n": _b64url_encode(n_bytes),
+            "e": _b64url_encode(e_bytes),
         }
         return "RS256", jwk
 

@@ -26,7 +26,7 @@ on-chip via an assertion request carrying the raw to-be-signed data in
 the ``previewSign`` extension payload.
 
 **IMPORTANT**: The ``previewSign`` extension is an experimental preview
-specification.  It is NOT yet standardized and is subject to change.
+specification.  It is not standardized and is subject to change.
 Only ES256 (ECDSA P-256) is supported.
 
 Lifecycle
@@ -46,16 +46,15 @@ Lifecycle
 
 from __future__ import annotations
 
+import base64
 import getpass
 import logging
 import os
 import sys
-from typing import Any, Mapping, Optional, Sequence, Tuple
+from typing import Any, Mapping, Optional
 
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
-from google.auth import _helpers
-from google.auth.dpop import DPoPSigner
+from google.auth.dpop import DPoPSigner, der_to_raw_ecdsa_signature
 
 try:
     from fido2.client import (
@@ -67,7 +66,6 @@ try:
         PreviewSignExtension,
         _SignGenerateKeyInputs,
         _SignInputs,
-        _SignOutputs,
         _SignSignInputs,
     )
     from fido2.hid import CtapHidDevice
@@ -224,8 +222,8 @@ def _parse_cose_public_key(public_key_cbor_bytes):
     jwk = {
         "kty": "EC",
         "crv": "P-256",
-        "x": _helpers.unpadded_urlsafe_b64encode(x_bytes).decode("ascii"),
-        "y": _helpers.unpadded_urlsafe_b64encode(y_bytes).decode("ascii"),
+        "x": base64.urlsafe_b64encode(x_bytes).rstrip(b"=").decode("ascii"),
+        "y": base64.urlsafe_b64encode(y_bytes).rstrip(b"=").decode("ascii"),
     }
 
     return public_key, jwk, "ES256"
@@ -416,9 +414,7 @@ class Fido2PreviewSignDPoPSigner(DPoPSigner):
 
         # The previewSign extension returns a DER-encoded ECDSA signature.
         # JWS ES256 requires raw (R || S) format -- 64 bytes for P-256.
-        # Convert DER -> raw R||S.
-        r, s = decode_dss_signature(signature)
-        return r.to_bytes(32, "big") + s.to_bytes(32, "big")
+        return der_to_raw_ecdsa_signature(signature, 32)
 
     def to_dict(self) -> dict:
         """Serializes the signer state to a dictionary.
@@ -465,7 +461,6 @@ class Fido2PreviewSignDPoPSigner(DPoPSigner):
             device=device,
             user_interaction=user_interaction,
         )
-
 
 
 def generate_signing_credential(

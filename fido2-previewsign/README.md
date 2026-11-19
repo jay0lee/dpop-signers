@@ -94,8 +94,11 @@ from google.oauth2.dpop_credentials import DPoPCredentials
 # Generate a new credential (first time only)
 signer = generate_signing_credential()
 
-# Or restore a saved credential
-# signer = Fido2PreviewSignDPoPSigner.from_dict(saved_data)
+# Or restore a saved credential lazily so hardware isn't accessed until refresh:
+# creds = DPoPCredentials.from_authorized_user_file(
+#     "credentials.json",
+#     dpop_signer=lambda: Fido2PreviewSignDPoPSigner.from_dict(saved_data),
+# )
 
 creds = DPoPCredentials.from_authorized_user_file(
     "credentials.json", dpop_signer=signer

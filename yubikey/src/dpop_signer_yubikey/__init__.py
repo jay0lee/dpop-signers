@@ -24,6 +24,7 @@ providing sender-constrained protection resistant to extraction or malware theft
 
 from __future__ import annotations
 
+import base64
 import datetime
 import getpass
 import logging
@@ -33,7 +34,6 @@ from typing import Any, Callable, Mapping, Optional, Tuple, Union
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
-from google.auth import _helpers
 from google.auth.dpop import DPoPSigner, der_to_raw_ecdsa_signature
 
 try:
@@ -57,6 +57,11 @@ except ImportError as _import_err:  # pragma: no cover
     _IMPORT_ERROR = _import_err
 
 logger = logging.getLogger(__name__)
+
+
+def _b64url_encode(data):
+    """Encodes bytes as unpadded URL-safe base64 ASCII text."""
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
 
 class YubiKeyDPoPError(Exception):
@@ -153,8 +158,8 @@ def public_key_to_jwk(public_key: Any) -> Tuple[str, Mapping[str, Any], int]:
         jwk = {
             "kty": "EC",
             "crv": crv_name,
-            "x": _helpers.unpadded_urlsafe_b64encode(x_bytes).decode("ascii"),
-            "y": _helpers.unpadded_urlsafe_b64encode(y_bytes).decode("ascii"),
+            "x": _b64url_encode(x_bytes),
+            "y": _b64url_encode(y_bytes),
         }
         return alg, jwk, crv_size
 
@@ -169,8 +174,8 @@ def public_key_to_jwk(public_key: Any) -> Tuple[str, Mapping[str, Any], int]:
         )
         jwk = {
             "kty": "RSA",
-            "n": _helpers.unpadded_urlsafe_b64encode(n_bytes).decode("ascii"),
-            "e": _helpers.unpadded_urlsafe_b64encode(e_bytes).decode("ascii"),
+            "n": _b64url_encode(n_bytes),
+            "e": _b64url_encode(e_bytes),
         }
         return alg, jwk, 0
 

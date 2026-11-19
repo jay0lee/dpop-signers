@@ -42,18 +42,17 @@ Key setup::
 
 Usage::
 
-    from linux_tpm_dpop import LinuxTPMDPoPSigner
+    from dpop_signer_linux_tpm import LinuxTPMDPoPSigner
 
     signer = LinuxTPMDPoPSigner(handle=0x81000001)
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import logging
-from typing import Any, Mapping, Optional
 
-from google.auth import _helpers
 from google.auth.dpop import DPoPSigner
 
 try:
@@ -138,8 +137,6 @@ class LinuxTPMDPoPSigner(DPoPSigner):
 
     def _read_public_key(self):
         """Read the public portion of the TPM key and build a JWK."""
-        from cryptography.hazmat.primitives.asymmetric import ec, rsa
-
         ectx = self._get_esapi()
         try:
             key_handle = ectx.tr_from_tpmpublic(self._handle_int)
@@ -169,12 +166,8 @@ class LinuxTPMDPoPSigner(DPoPSigner):
             jwk = {
                 "kty": "EC",
                 "crv": "P-256",
-                "x": _helpers.unpadded_urlsafe_b64encode(
-                    x_bytes
-                ).decode("ascii"),
-                "y": _helpers.unpadded_urlsafe_b64encode(
-                    y_bytes
-                ).decode("ascii"),
+                "x": base64.urlsafe_b64encode(x_bytes).rstrip(b"=").decode("ascii"),
+                "y": base64.urlsafe_b64encode(y_bytes).rstrip(b"=").decode("ascii"),
             }
             return "ES256", jwk
 
@@ -191,12 +184,8 @@ class LinuxTPMDPoPSigner(DPoPSigner):
 
             jwk = {
                 "kty": "RSA",
-                "n": _helpers.unpadded_urlsafe_b64encode(
-                    n_bytes
-                ).decode("ascii"),
-                "e": _helpers.unpadded_urlsafe_b64encode(
-                    e_bytes
-                ).decode("ascii"),
+                "n": base64.urlsafe_b64encode(n_bytes).rstrip(b"=").decode("ascii"),
+                "e": base64.urlsafe_b64encode(e_bytes).rstrip(b"=").decode("ascii"),
             }
             return "RS256", jwk
 
