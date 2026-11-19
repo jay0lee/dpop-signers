@@ -31,7 +31,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install pytest flake8 pyjwt cryptography
-          python -m pip install "google-auth @ git+https://github.com/jay0lee/google-cloud-python.git@main#subdirectory=packages/google-auth"
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/jay0lee/google-cloud-python.git "${RUNNER_TEMP}/gauth"
+          git -C "${RUNNER_TEMP}/gauth" sparse-checkout set packages/google-auth
+          python -m pip install "${RUNNER_TEMP}/gauth/packages/google-auth"
           python -c "import google.auth.dpop; print('google.auth.dpop OK')"
 
       - name: Lint with flake8
@@ -78,7 +81,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install pyjwt cryptography python-pkcs11 tpm2-pytss
-          python -m pip install "google-auth @ git+https://github.com/jay0lee/google-cloud-python.git@main#subdirectory=packages/google-auth"
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/jay0lee/google-cloud-python.git "${RUNNER_TEMP}/gauth"
+          git -C "${RUNNER_TEMP}/gauth" sparse-checkout set packages/google-auth
+          python -m pip install "${RUNNER_TEMP}/gauth/packages/google-auth"
           python -m pip install --no-deps ./ephemeral ./pkcs11 ./linux-tpm ./ecp
 
       - name: E2E ephemeral
@@ -150,10 +156,12 @@ jobs:
           tpm2_createprimary -C o -g sha256 -G ecc256 -c /tmp/primary_ec.ctx \
             -a 'fixedtpm|fixedparent|sensitivedataorigin|userwithauth|sign'
           tpm2_evictcontrol -C o -c /tmp/primary_ec.ctx 0x81000001
+          tpm2_flushcontext -t
 
           tpm2_createprimary -C o -g sha256 -G rsa2048 -c /tmp/primary_rsa.ctx \
             -a 'fixedtpm|fixedparent|sensitivedataorigin|userwithauth|sign'
           tpm2_evictcontrol -C o -c /tmp/primary_rsa.ctx 0x81000002
+          tpm2_flushcontext -t
 
           python - <<'EOF'
           import jwt
@@ -274,7 +282,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install pyjwt cryptography python-pkcs11
-          python -m pip install "google-auth @ git+https://github.com/jay0lee/google-cloud-python.git@main#subdirectory=packages/google-auth"
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/jay0lee/google-cloud-python.git "${RUNNER_TEMP}/gauth"
+          git -C "${RUNNER_TEMP}/gauth" sparse-checkout set packages/google-auth
+          python -m pip install "${RUNNER_TEMP}/gauth/packages/google-auth"
           python -m pip install --no-deps ./macos-secureenclave ./pkcs11
 
       - name: E2E macOS Secure Enclave (sc_auth CTK identity)
@@ -349,11 +360,16 @@ jobs:
           python-version: "3.12"
 
       - name: Install Python dependencies and windows-certstore
+        shell: bash
         run: |
           python -m pip install --upgrade pip
           python -m pip install pyjwt cryptography
-          python -m pip install "google-auth @ git+https://github.com/jay0lee/google-cloud-python.git@main#subdirectory=packages/google-auth"
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/jay0lee/google-cloud-python.git "${RUNNER_TEMP}/gauth"
+          git -C "${RUNNER_TEMP}/gauth" sparse-checkout set packages/google-auth
+          python -m pip install "${RUNNER_TEMP}/gauth/packages/google-auth"
           python -m pip install --no-deps ./windows-certstore
+          python -c "import google.auth.dpop; print('google.auth.dpop OK')"
 
       - name: Provision test certificates in Cert:\CurrentUser\My and test E2E
         shell: pwsh
