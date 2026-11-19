@@ -17,6 +17,7 @@ need.
 | [dpop-signer-macos-secureenclave](macos-secureenclave/) | macOS | Secure Enclave | none |
 | [dpop-signer-windows-certstore](windows-certstore/) | Windows | Windows Certificate Store (TPM / software / smartcard) | none |
 | [dpop-signer-linux-tpm](linux-tpm/) | Linux | TPM 2.0 | `tpm2-pytss` |
+| [dpop-signer-pkcs11](pkcs11/) | Linux, macOS, Windows | PKCS#11 (`tpm2-pkcs11`, OpenSC, HSMs, SoftHSM2) | `python-pkcs11` |
 | [dpop-signer-ecp](ecp/) | Any | Enterprise Certificate Proxy | none |
 
 ## Install
@@ -60,6 +61,7 @@ creds = DPoPCredentials(
 | macOS Secure Enclave | No | Optional (if created with `-t bio`) | Depends |
 | Windows Certificate Store | No | No | Yes |
 | Linux TPM | No | No | Yes |
+| PKCS#11 (`tpm2-pkcs11`, OpenSC, HSMs) | Token-dependent | Optional PIN per session | Depends |
 | ECP | No | No | Yes |
 
 ## License
