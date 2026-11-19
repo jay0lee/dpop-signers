@@ -291,6 +291,7 @@ jobs:
       - name: E2E macOS Secure Enclave (sc_auth CTK identity)
         run: |
           LABEL="dpop-ci-${GITHUB_RUN_ID}"
+          export SE_LABEL="$LABEL"
           echo "SE_LABEL=$LABEL" >> "$GITHUB_ENV"
           sc_auth create-ctk-identity -l "$LABEL" -k p-256-ne -t none
           sc_auth list-ctk-identities
