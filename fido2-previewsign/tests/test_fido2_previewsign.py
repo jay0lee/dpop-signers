@@ -54,6 +54,7 @@ def _install_fake_fido2(cose_key_dict):
     cbor_mod.decode = mock.MagicMock(return_value=cose_key_dict)
 
     for attr in (
+        "AuthenticatorSelectionCriteria",
         "PublicKeyCredentialCreationOptions",
         "PublicKeyCredentialDescriptor",
         "PublicKeyCredentialParameters",
@@ -63,6 +64,12 @@ def _install_fake_fido2(cose_key_dict):
         "PublicKeyCredentialUserEntity",
     ):
         setattr(webauthn_mod, attr, _Dummy)
+    webauthn_mod.UserVerificationRequirement = types.SimpleNamespace(
+        PREFERRED="preferred", DISCOURAGED="discouraged", REQUIRED="required"
+    )
+    webauthn_mod.ResidentKeyRequirement = types.SimpleNamespace(
+        REQUIRED="required", PREFERRED="preferred", DISCOURAGED="discouraged"
+    )
     webauthn_mod.PublicKeyCredentialType = mock.MagicMock()
 
     fido2_mod.cbor = cbor_mod
@@ -114,6 +121,7 @@ def test_fido2_previewsign_proof_and_roundtrip():
             key_handle=b"\x03\x04",
             public_key_bytes=b"cbor-bytes",
             device=mock.MagicMock(),
+            require_up=True,
         )
         proof = signer.create_proof("POST", "https://oauth2.googleapis.com/token")
         header = pyjwt.get_unverified_header(proof)
@@ -126,3 +134,387 @@ def test_fido2_previewsign_proof_and_roundtrip():
         assert restored.thumbprint == signer.thumbprint
         assert restored.credential_id == b"\x01\x02"
         assert restored.key_handle == b"\x03\x04"
+
+
+def test_find_device_selects_previewsign_capable_device():
+    fake_mods = _install_fake_fido2({})
+    ctap2_cls = mock.MagicMock()
+    dev_old = mock.MagicMock()
+    dev_58 = mock.MagicMock()
+    fake_mods["fido2.hid"].CtapHidDevice.list_devices.return_value = [dev_old, dev_58]
+
+    info_old = types.SimpleNamespace(extensions=["hmac-secret"])
+    info_58 = types.SimpleNamespace(extensions=["hmac-secret", "previewSign"])
+    ctap2_cls.side_effect = lambda d: mock.MagicMock(
+        get_info=lambda: info_old if d is dev_old else info_58
+    )
+    fake_mods["fido2.ctap2"].Ctap2 = ctap2_cls
+
+    sys.modules.pop("dpop_signer_fido2_previewsign", None)
+    with mock.patch.dict(sys.modules, fake_mods):
+        mod = importlib.import_module("dpop_signer_fido2_previewsign")
+        assert mod._find_device() is dev_58
+
+        ctap2_cls.side_effect = lambda d: mock.MagicMock(get_info=lambda: info_old)
+        try:
+            mod._find_device()
+            raise AssertionError("Expected Fido2ExtensionNotSupportedError")
+        except mod.Fido2ExtensionNotSupportedError:
+            pass
+
+
+def test_resolve_uv_requirement():
+    import importlib
+    import sys
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    mod = sys.modules.get("dpop_signer_fido2_previewsign")
+    if mod is None:
+        fake_webauthn = MagicMock()
+        fake_webauthn.UserVerificationRequirement.PREFERRED = "preferred"
+        fake_webauthn.UserVerificationRequirement.DISCOURAGED = "discouraged"
+        fake_fido2 = MagicMock()
+        fake_fido2.webauthn = fake_webauthn
+        stubs = {
+            "fido2": fake_fido2,
+            "fido2.client": fake_fido2.client,
+            "fido2.cose": fake_fido2.cose,
+            "fido2.ctap2": fake_fido2.ctap2,
+            "fido2.ctap2.base": fake_fido2.ctap2.base,
+            "fido2.ctap2.extensions": fake_fido2.ctap2.extensions,
+            "fido2.hid": fake_fido2.hid,
+            "fido2.server": fake_fido2.server,
+            "fido2.utils": fake_fido2.utils,
+            "fido2.webauthn": fake_webauthn,
+        }
+        with patch.dict(sys.modules, stubs):
+            mod = importlib.import_module("dpop_signer_fido2_previewsign")
+
+    preferred = mod.UserVerificationRequirement.PREFERRED
+    discouraged = mod.UserVerificationRequirement.DISCOURAGED
+    assert preferred != discouraged
+
+    def _client(options):
+        return SimpleNamespace(info=SimpleNamespace(options=options))
+
+    assert mod._resolve_uv_requirement(_client({"clientPin": False})) == discouraged
+    assert mod._resolve_uv_requirement(_client({})) == discouraged
+    assert mod._resolve_uv_requirement(_client(None)) == discouraged
+    assert mod._resolve_uv_requirement(_client({"clientPin": True})) == preferred
+    assert mod._resolve_uv_requirement(_client({"uv": True})) == preferred
+    assert mod._resolve_uv_requirement(_client({"bioEnroll": True})) == preferred
+    assert (
+        mod._resolve_uv_requirement(_client({"clientPin": False}), require_uv=True)
+        == mod.UserVerificationRequirement.REQUIRED
+    )
+
+
+def test_arkg_roundtrip_and_prehash():
+    import hashlib
+    import importlib
+    import sys
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    pn = ec.generate_private_key(ec.SECP256R1()).public_key().public_numbers()
+    fake_cbor = MagicMock()
+    pk_map = {
+        1: 2,
+        3: -9,
+        -1: 1,
+        -2: pn.x.to_bytes(32, "big"),
+        -3: pn.y.to_bytes(32, "big"),
+    }
+    args_map = {3: -65539, -1: b"\xaa\xbb", -2: b"ctx"}
+    fake_cbor.decode.side_effect = lambda b: {b"pk": pk_map, b"args": args_map}[b]
+
+    mod = sys.modules.get("dpop_signer_fido2_previewsign")
+    if mod is None:
+        fake_fido2 = MagicMock()
+        with patch.dict(
+            sys.modules,
+            {
+                "fido2": fake_fido2,
+                "fido2.cbor": fake_cbor,
+                "fido2.client": fake_fido2.client,
+                "fido2.cose": fake_fido2.cose,
+                "fido2.ctap2": fake_fido2.ctap2,
+                "fido2.ctap2.base": fake_fido2.ctap2.base,
+                "fido2.ctap2.extensions": fake_fido2.ctap2.extensions,
+                "fido2.hid": fake_fido2.hid,
+                "fido2.server": fake_fido2.server,
+                "fido2.utils": fake_fido2.utils,
+                "fido2.webauthn": fake_fido2.webauthn,
+            },
+        ):
+            mod = importlib.import_module("dpop_signer_fido2_previewsign")
+
+    fido2_pkg = sys.modules.get("fido2", MagicMock())
+    fido2_pkg.cbor = fake_cbor
+    with patch.dict(sys.modules, {"fido2": fido2_pkg, "fido2.cbor": fake_cbor}):
+        signer = mod.Fido2PreviewSignDPoPSigner(
+            credential_id=b"\x11\x22",
+            key_handle=b"\x33\x44",
+            public_key_bytes=b"pk",
+            device=MagicMock(),
+            additional_args=b"args",
+            require_up=True,
+        )
+        assert signer.algorithm == "ES256"
+        assert signer.public_jwk["kty"] == "EC"
+        assert signer.public_jwk["crv"] == "P-256"
+
+        serialized = signer.to_dict()
+        assert serialized["additional_args"] == b"args".hex()
+        assert serialized["require_up"] is True
+        restored = mod.Fido2PreviewSignDPoPSigner.from_dict(
+            serialized, device=MagicMock()
+        )
+        assert restored.to_dict() == serialized
+
+        from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+
+        der_sig = encode_dss_signature(123, 456)
+        mock_client = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.client_extension_results.preview_sign.signature = der_sig
+        mock_client.get_assertion.return_value.get_response.return_value = mock_resp
+
+        sign_sign_inputs_spy = MagicMock(return_value=SimpleNamespace(sentinel=True))
+        with patch.object(mod, "_make_client", return_value=mock_client), patch.object(
+            mod, "_SignSignInputs", sign_sign_inputs_spy
+        ):
+            raw_sig = restored.sign(b"hello-dpop")
+
+        assert len(raw_sig) == 64
+        sign_sign_inputs_spy.assert_called_once_with(
+            key_handle=b"\x33\x44",
+            tbs=hashlib.sha256(b"hello-dpop").digest(),
+            additional_args=b"args",
+        )
+
+
+def test_unattended_sign_and_flags():
+    import hashlib
+    import importlib
+    import sys
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+
+    pn = ec.generate_private_key(ec.SECP256R1()).public_key().public_numbers()
+    pk_map = {
+        1: 2,
+        3: -9,
+        -1: 1,
+        -2: pn.x.to_bytes(32, "big"),
+        -3: pn.y.to_bytes(32, "big"),
+    }
+    args_map = {3: -65539, -1: b"\xaa\xbb", -2: b"ctx"}
+    fake_cbor = MagicMock()
+    fake_cbor.decode.side_effect = lambda b: {b"pk": pk_map, b"args": args_map}[b]
+
+    mod = sys.modules.get("dpop_signer_fido2_previewsign")
+    if mod is None:
+        fake_fido2 = MagicMock()
+        with patch.dict(
+            sys.modules,
+            {
+                "fido2": fake_fido2,
+                "fido2.cbor": fake_cbor,
+                "fido2.client": fake_fido2.client,
+                "fido2.cose": fake_fido2.cose,
+                "fido2.ctap2": fake_fido2.ctap2,
+                "fido2.ctap2.base": fake_fido2.ctap2.base,
+                "fido2.ctap2.extensions": fake_fido2.ctap2.extensions,
+                "fido2.hid": fake_fido2.hid,
+                "fido2.server": fake_fido2.server,
+                "fido2.utils": fake_fido2.utils,
+                "fido2.webauthn": fake_fido2.webauthn,
+            },
+        ):
+            mod = importlib.import_module("dpop_signer_fido2_previewsign")
+
+    fido2_pkg = sys.modules.get("fido2", MagicMock())
+    fido2_pkg.cbor = fake_cbor
+    fake_ctap2_cls = MagicMock()
+    der_sig = encode_dss_signature(111, 222)
+    fake_ctap2_cls.return_value.get_assertion.return_value = SimpleNamespace(
+        auth_data=SimpleNamespace(
+            extensions={mod.PreviewSignExtension.NAME: {6: der_sig}}
+        )
+    )
+    fake_ctap2_mod = MagicMock()
+    fake_ctap2_mod.Ctap2 = fake_ctap2_cls
+
+    with patch.dict(
+        sys.modules,
+        {"fido2": fido2_pkg, "fido2.cbor": fake_cbor, "fido2.ctap2": fake_ctap2_mod},
+    ):
+        signer = mod.Fido2PreviewSignDPoPSigner(
+            credential_id=b"\x11\x22",
+            key_handle=b"\x33\x44",
+            public_key_bytes=b"pk",
+            device=MagicMock(),
+            additional_args=b"args",
+        )
+        assert signer.to_dict()["require_up"] is False
+        raw_sig = signer.sign(b"silent-dpop")
+        assert len(raw_sig) == 64
+
+        call_args = fake_ctap2_cls.return_value.get_assertion.call_args[0]
+        assert call_args[0] == "dpop.local"
+        assert call_args[2] == [{"type": "public-key", "id": b"\x11\x22"}]
+        assert call_args[3] == {
+            mod.PreviewSignExtension.NAME: {
+                2: b"\x33\x44",
+                6: hashlib.sha256(b"silent-dpop").digest(),
+                7: b"args",
+            }
+        }
+        assert call_args[4] == {"up": False}
+
+    # Verify _make_unattended_preview_sign_extension forces flags (4) to 0
+    fake_proc = SimpleNamespace(
+        prepare_inputs=lambda token: {
+            mod.PreviewSignExtension.NAME: {3: [-7, -65539], 4: 1}
+        }
+    )
+    fake_ext_instance = SimpleNamespace(make_credential=lambda c, o, p: fake_proc)
+    with patch.object(mod, "PreviewSignExtension", return_value=fake_ext_instance):
+        unattended_ext = mod._make_unattended_preview_sign_extension()
+    proc = unattended_ext.make_credential(None, None, None)
+    assert proc.prepare_inputs(None)[mod.PreviewSignExtension.NAME][4] == 0
+
+
+def test_generate_signing_credential_options_and_pin():
+    import json
+    from unittest import mock
+
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    pn = ec.generate_private_key(ec.SECP256R1()).public_key().public_numbers()
+    cose_dict = {
+        1: 2,
+        3: -7,
+        -1: 1,
+        -2: pn.x.to_bytes(32, "big"),
+        -3: pn.y.to_bytes(32, "big"),
+    }
+    fake_mods = _install_fake_fido2(cose_dict)
+    derived_pk = {
+        1: 2,
+        3: -9,
+        -1: 1,
+        -2: pn.x.to_bytes(32, "big"),
+        -3: pn.y.to_bytes(32, "big"),
+    }
+    arkg_stub = mock.MagicMock()
+    arkg_stub.derive_public_key.return_value = (derived_pk, {3: -65539, -1: b"kh"})
+    fake_mods["fido2"].cbor.encode = mock.MagicMock(return_value=b"encoded")
+    fake_cose_mod = mock.MagicMock()
+    fake_cose_mod.CoseKey.parse.return_value = arkg_stub
+    fake_mods["fido2.cose"] = fake_cose_mod
+
+    sys.modules.pop("dpop_signer_fido2_previewsign", None)
+    with mock.patch.dict(sys.modules, fake_mods):
+        mod = importlib.import_module("dpop_signer_fido2_previewsign")
+
+        fake_client = mock.MagicMock()
+        fake_client.info.extensions = ["previewSign"]
+        fake_client.info.options = {"clientPin": True}
+        reg_res = mock.MagicMock()
+        reg_res.response.attestation_object.auth_data.credential_data.credential_id = (
+            b"\xaa\xbb"
+        )
+        reg_res.client_extension_results.preview_sign.generated_key = types.SimpleNamespace(
+            key_handle=b"\xcc\xdd",
+            public_key=b"arkg-cbor",
+            algorithm=-65539,
+        )
+        fake_client.make_credential.return_value = reg_res
+
+        with mock.patch.object(mod, "_make_client", return_value=fake_client) as mk_cli:
+            signer = mod.generate_signing_credential(
+                device=mock.MagicMock(),
+                resident_key=True,
+                require_uv=True,
+                pin="9988",
+            )
+
+        # Default extension used when require_uv=True (flags=5 via PreviewSignExtension)
+        assert "extensions" not in mk_cli.call_args.kwargs
+        cli_interaction = mk_cli.call_args.kwargs["user_interaction"]
+        assert cli_interaction.request_pin(0, "dpop.local") == "9988"
+
+        mc_opts = fake_client.make_credential.call_args[0][0]
+        sel = mc_opts.kwargs["authenticator_selection"].kwargs
+        assert sel["resident_key"] == mod.ResidentKeyRequirement.REQUIRED
+        assert sel["user_verification"] == mod.UserVerificationRequirement.REQUIRED
+
+        assert signer.require_up is True
+        assert signer.require_uv is True
+        dumped = json.dumps(signer.to_dict())
+        assert "9988" not in dumped
+        restored = mod.Fido2PreviewSignDPoPSigner.from_dict(
+            json.loads(dumped), device=mock.MagicMock(), pin="9988"
+        )
+        assert restored.require_up is True
+        assert restored.require_uv is True
+
+
+def test_error_paths_and_up_required_message():
+    from unittest import mock
+
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    pn = ec.generate_private_key(ec.SECP256R1()).public_key().public_numbers()
+    valid_cose = {
+        1: 2,
+        3: -7,
+        -1: 1,
+        -2: pn.x.to_bytes(32, "big"),
+        -3: pn.y.to_bytes(32, "big"),
+    }
+    fake_mods = _install_fake_fido2(valid_cose)
+
+    sys.modules.pop("dpop_signer_fido2_previewsign", None)
+    with mock.patch.dict(sys.modules, fake_mods):
+        mod = importlib.import_module("dpop_signer_fido2_previewsign")
+
+        fake_mods["fido2"].cbor.decode.return_value = {1: 3}
+        try:
+            mod._parse_cose_public_key(b"bad")
+            raise AssertionError("Expected ValueError for non-EC2 key")
+        except ValueError:
+            pass
+
+        fake_mods["fido2"].cbor.decode.return_value = {1: 2, 3: -8}
+        try:
+            mod._parse_cose_public_key(b"bad-alg")
+            raise AssertionError("Expected ValueError for unsupported alg")
+        except ValueError:
+            pass
+
+        fake_mods["fido2"].cbor.decode.return_value = valid_cose
+        signer = mod.Fido2PreviewSignDPoPSigner(
+            credential_id=b"\x01",
+            key_handle=b"\x02",
+            public_key_bytes=b"pk",
+            device=mock.MagicMock(),
+            require_up=False,
+        )
+        err = Exception("UP_REQUIRED")
+        err.code = 0x3B
+        fake_mods["fido2.ctap2"].Ctap2 = mock.MagicMock()
+        fake_mods["fido2.ctap2"].Ctap2.return_value.get_assertion.side_effect = err
+        try:
+            signer.sign(b"payload")
+            raise AssertionError("Expected Fido2PreviewSignError")
+        except mod.Fido2PreviewSignError as exc:
+            assert "User Presence" in str(exc)

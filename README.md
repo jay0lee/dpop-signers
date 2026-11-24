@@ -57,7 +57,7 @@ creds = DPoPCredentials(
 |--------|----------------|------------------------|-------------|
 | Software (PEM) | No | No | Yes |
 | YubiKey PIV (slot 9c) | No | Once per session | Yes |
-| FIDO2 previewSign | **Yes, every time** | Once per session | **No** |
+| FIDO2 previewSign | Optional (default: No; `require_up=True`) | Optional (if configured / `require_uv=True`) | Yes (default) |
 | macOS Secure Enclave | No | Optional (if created with `-t bio`) | Depends |
 | Windows Certificate Store | No | No | Yes |
 | Linux TPM | No | No | Yes |

@@ -7,7 +7,7 @@ security key via the experimental `previewSign` CTAP2 extension. The private
 key is generated on-chip and **never leaves the hardware**.
 
 > **WARNING**: The `previewSign` extension is an experimental preview
-> specification ([WebAuthn Sign Extension](https://github.com/AlfredoBerrworksworking/webauthn-sign-extension))
+> specification ([WebAuthn Sign Extension](https://github.com/yubicolabs/webauthn-sign-extension))
 > and is subject to change. Use at your own risk.
 
 ## Supported Hardware
@@ -27,12 +27,12 @@ pip install dpop-signer-fido2-previewsign
 Requires the [python-fido2](https://github.com/Yubico/python-fido2) library
 (`fido2 >= 2.2.0`).
 
-> **NOTE**: Every signing operation requires a **physical touch** of the
-> security key. This is inherent to FIDO2 `getAssertion` and cannot be
-> disabled. Since DPoP proofs are only generated at token refresh (~once
-> per hour), this is manageable for interactive sessions but makes this
-> signer unsuitable for unattended/background processes. See the
-> [comparison table](#comparison-with-other-signers) below.
+> **NOTE**: By default (`require_up=False`), `generate_signing_credential()`
+> provisions the key with `PreviewSignOptions.Unattended = 0` so only the
+> one-time key creation requires a touch, and subsequent DPoP signatures run
+> silently via CTAP2 `options={"up": False}`. Pass `require_up=True` or
+> `require_uv=True` if you want touch or PIN/biometric confirmation on every
+> signature. See the [comparison table](#comparison-with-other-signers) below.
 
 ## How It Works
 
@@ -57,7 +57,10 @@ from dpop_signer_fido2_previewsign import generate_signing_credential
 
 # Insert your security key and run:
 signer = generate_signing_credential()
-# You will be prompted for PIN and touch
+# Prompts once for touch (and FIDO2 PIN if configured).
+# Pass resident_key=True to store as a discoverable passkey visible in
+# Yubico Authenticator, require_up=True for touch per sign, require_uv=True
+# for PIN/biometric verification per sign, or pin="..." for non-interactive PIN.
 
 # Save the credential for later use (no private key leaves the device)
 import json
@@ -66,11 +69,10 @@ print(saved)
 ```
 
 The `generate_signing_credential()` function will:
-1. Find a connected FIDO2 device
-2. Verify it supports the `previewSign` extension
-3. Prompt for PIN and touch confirmation
-4. Create an on-device ECDSA P-256 signing key
-5. Return a signer ready to produce DPoP proofs
+1. Find a connected FIDO2 device supporting `previewSign`
+2. Prompt for touch confirmation once (and PIN if configured on the key)
+3. Create an on-device ECDSA P-256 / ARKG signing key
+4. Return a signer ready to produce DPoP proofs (unattended by default)
 
 ## Restoring a Previously Generated Credential
 
@@ -114,11 +116,30 @@ creds = DPoPCredentials.from_authorized_user_file(
 | Hardware | Any CTAP 2.3 key | YubiKey only |
 | PIV management key | Not needed | Required for key gen |
 | X.509 certificate | Not needed | Required by PIV |
-| PIN | FIDO2 PIN (once per session) | PIV PIN (once per session) |
-| Touch per sign | **Yes, always** | No (slot 9c after PIN) |
-| Unattended use | No | Yes |
-| Key generation | On-device via ARKG | On-device via PIV |
+| PIN | Optional (if configured / `require_uv=True`) | PIV PIN (once per session) |
+| Touch per sign | Optional (No by default; `require_up=True`) | No (slot 9c after PIN) |
+| Unattended use | Yes (default, `require_up=False`) | Yes |
+| Discoverable (passkey) | Optional (`resident_key=True`, default `False`) | N/A |
+| Key generation | On-device via ARKG (`-65539` / `-7`) | On-device via PIV |
 | Maturity | Experimental preview | Stable |
+
+## Key Generation Parameters
+
+```python
+generate_signing_credential(
+    rp_id="dpop.local",      # Relying party ID
+    rp_name="DPoP Signing",  # Relying party display name
+    user_id=None,            # Random 32 bytes if omitted
+    user_name="dpop-signer", # User name for the credential
+    key_id=None,             # Optional custom key identifier
+    device=None,             # Optional pre-resolved CtapHidDevice
+    user_interaction=None,   # Optional UserInteraction for PIN/touch
+    require_up=False,        # True = require physical touch per signature
+    require_uv=False,        # True = require PIN/biometric per signature
+    resident_key=False,      # True = discoverable credential in Yubico Authenticator
+    pin=None,                # Optional FIDO2 PIN (non-interactive)
+)
+```
 
 ## Constructor Parameters
 
@@ -127,10 +148,14 @@ Fido2PreviewSignDPoPSigner(
     credential_id=b"...",    # FIDO2 credential ID from registration
     key_handle=b"...",       # ARKG key handle from previewSign
     public_key_bytes=b"...", # CBOR-encoded COSE public key
-    rp_id="dpop.local",     # Relying party ID (must match registration)
+    rp_id="dpop.local",      # Relying party ID (must match registration)
     key_id=None,             # Optional custom key identifier
     device=None,             # Optional pre-resolved CtapHidDevice
     user_interaction=None,   # Optional UserInteraction for PIN/touch
+    additional_args=None,    # CBOR ARKG signing args (for ESP256-split keys)
+    require_up=False,        # True = require touch per signature
+    require_uv=False,        # True = require PIN/biometric per signature
+    pin=None,                # Optional FIDO2 PIN (non-interactive)
 )
 ```
 
