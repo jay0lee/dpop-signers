@@ -45,7 +45,6 @@ def _install_fake_fido2(cose_key_dict):
         NAME = "previewSign"
 
     ext_mod.PreviewSignExtension = _PreviewSignExtension
-    ext_mod._SignGenerateKeyInputs = _Dummy
     ext_mod._SignInputs = _Dummy
     ext_mod._SignSignInputs = _Dummy
 
@@ -54,21 +53,13 @@ def _install_fake_fido2(cose_key_dict):
     cbor_mod.decode = mock.MagicMock(return_value=cose_key_dict)
 
     for attr in (
-        "AuthenticatorSelectionCriteria",
-        "PublicKeyCredentialCreationOptions",
         "PublicKeyCredentialDescriptor",
-        "PublicKeyCredentialParameters",
         "PublicKeyCredentialRequestOptions",
-        "PublicKeyCredentialRpEntity",
         "PublicKeyCredentialType",
-        "PublicKeyCredentialUserEntity",
     ):
         setattr(webauthn_mod, attr, _Dummy)
     webauthn_mod.UserVerificationRequirement = types.SimpleNamespace(
         PREFERRED="preferred", DISCOURAGED="discouraged", REQUIRED="required"
-    )
-    webauthn_mod.ResidentKeyRequirement = types.SimpleNamespace(
-        REQUIRED="required", PREFERRED="preferred", DISCOURAGED="discouraged"
     )
     webauthn_mod.PublicKeyCredentialType = mock.MagicMock()
 
@@ -379,20 +370,8 @@ def test_unattended_sign_and_flags():
         }
         assert call_args[4] == {"up": False}
 
-    # Verify _make_unattended_preview_sign_extension forces flags (4) to 0
-    fake_proc = SimpleNamespace(
-        prepare_inputs=lambda token: {
-            mod.PreviewSignExtension.NAME: {3: [-7, -65539], 4: 1}
-        }
-    )
-    fake_ext_instance = SimpleNamespace(make_credential=lambda c, o, p: fake_proc)
-    with patch.object(mod, "PreviewSignExtension", return_value=fake_ext_instance):
-        unattended_ext = mod._make_unattended_preview_sign_extension()
-    proc = unattended_ext.make_credential(None, None, None)
-    assert proc.prepare_inputs(None)[mod.PreviewSignExtension.NAME][4] == 0
 
-
-def test_generate_signing_credential_options_and_pin():
+def test_require_uv_pin_and_roundtrip():
     import json
     from unittest import mock
 
@@ -407,58 +386,22 @@ def test_generate_signing_credential_options_and_pin():
         -3: pn.y.to_bytes(32, "big"),
     }
     fake_mods = _install_fake_fido2(cose_dict)
-    derived_pk = {
-        1: 2,
-        3: -9,
-        -1: 1,
-        -2: pn.x.to_bytes(32, "big"),
-        -3: pn.y.to_bytes(32, "big"),
-    }
-    arkg_stub = mock.MagicMock()
-    arkg_stub.derive_public_key.return_value = (derived_pk, {3: -65539, -1: b"kh"})
-    fake_mods["fido2"].cbor.encode = mock.MagicMock(return_value=b"encoded")
-    fake_cose_mod = mock.MagicMock()
-    fake_cose_mod.CoseKey.parse.return_value = arkg_stub
-    fake_mods["fido2.cose"] = fake_cose_mod
 
     sys.modules.pop("dpop_signer_fido2_previewsign", None)
     with mock.patch.dict(sys.modules, fake_mods):
         mod = importlib.import_module("dpop_signer_fido2_previewsign")
 
-        fake_client = mock.MagicMock()
-        fake_client.info.extensions = ["previewSign"]
-        fake_client.info.options = {"clientPin": True}
-        reg_res = mock.MagicMock()
-        reg_res.response.attestation_object.auth_data.credential_data.credential_id = (
-            b"\xaa\xbb"
-        )
-        reg_res.client_extension_results.preview_sign.generated_key = types.SimpleNamespace(
+        signer = mod.Fido2PreviewSignDPoPSigner(
+            credential_id=b"\xaa\xbb",
             key_handle=b"\xcc\xdd",
-            public_key=b"arkg-cbor",
-            algorithm=-65539,
+            public_key_bytes=b"pk",
+            device=mock.MagicMock(),
+            require_uv=True,
+            pin="9988",
         )
-        fake_client.make_credential.return_value = reg_res
-
-        with mock.patch.object(mod, "_make_client", return_value=fake_client) as mk_cli:
-            signer = mod.generate_signing_credential(
-                device=mock.MagicMock(),
-                resident_key=True,
-                require_uv=True,
-                pin="9988",
-            )
-
-        # Default extension used when require_uv=True (flags=5 via PreviewSignExtension)
-        assert "extensions" not in mk_cli.call_args.kwargs
-        cli_interaction = mk_cli.call_args.kwargs["user_interaction"]
-        assert cli_interaction.request_pin(0, "dpop.local") == "9988"
-
-        mc_opts = fake_client.make_credential.call_args[0][0]
-        sel = mc_opts.kwargs["authenticator_selection"].kwargs
-        assert sel["resident_key"] == mod.ResidentKeyRequirement.REQUIRED
-        assert sel["user_verification"] == mod.UserVerificationRequirement.REQUIRED
-
         assert signer.require_up is True
         assert signer.require_uv is True
+
         dumped = json.dumps(signer.to_dict())
         assert "9988" not in dumped
         restored = mod.Fido2PreviewSignDPoPSigner.from_dict(
@@ -466,6 +409,20 @@ def test_generate_signing_credential_options_and_pin():
         )
         assert restored.require_up is True
         assert restored.require_uv is True
+
+        cli = mod._CliInteraction(pin="9988")
+        assert cli.request_pin(0, "dpop.local") == "9988"
+
+        fake_client = mock.MagicMock()
+        resp = mock.MagicMock()
+        resp.client_extension_results.preview_sign.signature = b"\x30\x06\x02\x01\x01\x02\x01\x01"
+        fake_client.get_assertion.return_value.get_response.return_value = resp
+        with mock.patch.object(mod, "_make_client", return_value=fake_client) as mk_cli:
+            sig = restored.sign(b"hello")
+        assert len(sig) == 64
+        assert mk_cli.call_args.kwargs["user_interaction"].request_pin(0, "dpop.local") == "9988"
+        req_opts = fake_client.get_assertion.call_args[0][0]
+        assert req_opts.kwargs["user_verification"] == mod.UserVerificationRequirement.REQUIRED
 
 
 def test_error_paths_and_up_required_message():

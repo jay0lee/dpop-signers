@@ -31,16 +31,14 @@ Only ES256 (ECDSA P-256) is supported.
 
 Lifecycle
 ---------
-1. **Key generation** -- Call :func:`generate_signing_credential`
-   to create a new FIDO2 credential with the ``previewSign`` extension
-   on the security key (one touch required for key creation).  By
-   default keys are created with ``Unattended = 0`` flags (no touch
-   needed per signature) and as non-resident credentials; pass
-   ``require_up=True``, ``require_uv=True``, or ``resident_key=True``
-   to override.
-2. **Signing** -- Call :meth:`sign` or :meth:`create_proof` to produce
-   DPoP proof JWTs.  With the default ``require_up=False``, signing runs
-   silently via CTAP2 ``options={'up': False}``.
+1. **Provisioning** -- Provision a FIDO2 ``previewSign`` credential
+   externally (see the package README for a minimal setup snippet) and
+   record ``credential_id``, ``key_handle``, ``public_key_bytes``, and
+   (for YubiKey 5.8 ARKG) ``additional_args``.
+2. **Signing** -- Instantiate :class:`Fido2PreviewSignDPoPSigner` (or
+   :meth:`Fido2PreviewSignDPoPSigner.from_dict`) and call :meth:`sign`
+   or :meth:`create_proof`.  With the default ``require_up=False``,
+   signing runs silently via CTAP2 ``options={'up': False}``.
 3. **Persistence** -- Save the dictionary returned by :meth:`to_dict`
    and restore later via :meth:`Fido2PreviewSignDPoPSigner.from_dict`.
 """
@@ -66,22 +64,15 @@ try:
     )
     from fido2.ctap2.extensions import (
         PreviewSignExtension,
-        _SignGenerateKeyInputs,
         _SignInputs,
         _SignSignInputs,
     )
     from fido2.hid import CtapHidDevice
     from fido2.utils import websafe_encode
     from fido2.webauthn import (
-        AuthenticatorSelectionCriteria,
-        PublicKeyCredentialCreationOptions,
         PublicKeyCredentialDescriptor,
-        PublicKeyCredentialParameters,
         PublicKeyCredentialRequestOptions,
-        PublicKeyCredentialRpEntity,
         PublicKeyCredentialType,
-        PublicKeyCredentialUserEntity,
-        ResidentKeyRequirement,
         UserVerificationRequirement,
     )
 
@@ -103,7 +94,6 @@ _COSE_ESP256_SPLIT_ARKG = -65539
 # This RP ID is used only to scope the FIDO2 credential on the
 # authenticator -- it is not validated by any server.
 _DEFAULT_RP_ID = "dpop.local"
-_DEFAULT_RP_NAME = "DPoP Signing"
 
 
 class Fido2PreviewSignError(Exception):
@@ -186,19 +176,13 @@ def _resolve_uv_requirement(client, require_uv: bool = False):
     return UserVerificationRequirement.DISCOURAGED
 
 
-def _make_client(
-    device,
-    rp_id=_DEFAULT_RP_ID,
-    user_interaction=None,
-    extensions=None,
-):
+def _make_client(device, rp_id=_DEFAULT_RP_ID, user_interaction=None):
     """Creates a Fido2Client configured for the previewSign extension.
 
     Args:
         device: A CtapHidDevice instance.
         rp_id: The relying party ID.
         user_interaction: Optional UserInteraction instance.
-        extensions: Optional list of Ctap2Extension instances.
 
     Returns:
         Fido2Client: The configured client.
@@ -208,35 +192,8 @@ def _make_client(
         device,
         client_data_collector=DefaultClientDataCollector(origin),
         user_interaction=user_interaction or _CliInteraction(),
-        extensions=(
-            extensions if extensions is not None else [PreviewSignExtension()]
-        ),
+        extensions=[PreviewSignExtension()],
     )
-
-
-def _make_unattended_preview_sign_extension():
-    """Returns a PreviewSignExtension requesting flags=0 (Unattended)."""
-    ext = PreviewSignExtension()
-    orig_make_cred = ext.make_credential
-
-    def _make_cred(ctap, options, pin_protocol):
-        proc = orig_make_cred(ctap, options, pin_protocol)
-        if proc is None:
-            return None
-        orig_prepare = proc.prepare_inputs
-
-        def _prepare(pin_token):
-            out = orig_prepare(pin_token)
-            if out and PreviewSignExtension.NAME in out:
-                # Yubico PreviewSignOptions.Unattended = 0 (no UP/UV per sign).
-                out[PreviewSignExtension.NAME][4] = 0
-            return out
-
-        proc.prepare_inputs = _prepare
-        return proc
-
-    ext.make_credential = _make_cred
-    return ext
 
 
 def _prepare_tbs(data: bytes, additional_args: Optional[bytes]) -> bytes:
@@ -635,210 +592,3 @@ class Fido2PreviewSignDPoPSigner(DPoPSigner):
             require_uv=data.get("require_uv", False),
             pin=pin,
         )
-
-
-def generate_signing_credential(
-    rp_id=_DEFAULT_RP_ID,
-    rp_name=_DEFAULT_RP_NAME,
-    user_id=None,
-    user_name="dpop-signer",
-    key_id=None,
-    device=None,
-    user_interaction=None,
-    require_up=False,
-    require_uv=False,
-    resident_key=False,
-    pin=None,
-):
-    """Generates a new previewSign signing credential on a FIDO2 device.
-
-    This is a standalone key-generation helper -- separate from the
-    signer class because DPoP signers should only *reference* existing
-    keys, not create them.
-
-    Creates a FIDO2 credential with the ``previewSign`` extension,
-    which provisions a hardware-backed ECDSA P-256 signing key via
-    ARKG (Asynchronous Remote Key Generation).
-
-    **User interaction is required** -- the authenticator will prompt
-    for PIN entry and/or touch confirmation.
-
-    Args:
-        rp_id (str): The relying party ID. Defaults to ``'dpop.local'``.
-        rp_name (str): The relying party display name.
-        user_id (Optional[bytes]): The user ID (random 32 bytes if
-            omitted).
-        user_name (str): The user name for the credential.
-        key_id (Optional[str]): Optional custom key identifier.
-        device: Optional CtapHidDevice to use.
-        user_interaction: Optional UserInteraction for PIN/touch.
-        require_up (bool): Whether user presence (physical touch) is
-            required on each signature. Defaults to ``False``
-            (``PreviewSignOptions.Unattended = 0``), so only credential
-            creation requires a touch.
-        require_uv (bool): Whether user verification (PIN/biometric) is
-            required on each signature. Defaults to ``False``; when
-            ``True``, sets ``PreviewSignOptions.RequireUserVerification``
-            (``5``) and implies ``require_up=True``.
-        resident_key (bool): Whether to create a discoverable (resident)
-            credential stored on-chip and visible in Yubico Authenticator.
-            Defaults to ``False``.
-        pin (Optional[str]): Optional FIDO2 PIN for non-interactive PIN
-            prompts when ``user_interaction`` is not provided.
-
-    Returns:
-        Fido2PreviewSignDPoPSigner: A signer configured with the
-            newly generated credential.
-
-    Raises:
-        Fido2PreviewSignError: If device not found or extension
-            not supported.
-        Fido2ExtensionNotSupportedError: If the device does not
-            support previewSign.
-    """
-    if not _FIDO2_AVAILABLE:
-        raise Fido2PreviewSignError(
-            f"fido2 library is not installed: {_IMPORT_ERROR}. "
-            "Install with 'pip install fido2'."
-        )
-
-    if device is None:
-        device = _find_device()
-
-    unattended = not (require_up or require_uv)
-    client_kwargs = {
-        "rp_id": rp_id,
-        "user_interaction": user_interaction or _CliInteraction(pin=pin),
-    }
-    if unattended:
-        client_kwargs["extensions"] = [
-            _make_unattended_preview_sign_extension()
-        ]
-    client = _make_client(device, **client_kwargs)
-
-    # Check that the authenticator supports previewSign
-    if (
-        not hasattr(client, "info")
-        or client.info is None
-        or PreviewSignExtension.NAME not in (client.info.extensions or [])
-    ):
-        raise Fido2ExtensionNotSupportedError(
-            "The connected FIDO2 device does not support the "
-            "'previewSign' extension. Ensure firmware is 5.8+ "
-            "and the extension is enabled."
-        )
-
-    if user_id is None:
-        user_id = os.urandom(32)
-
-    rp = PublicKeyCredentialRpEntity(id=rp_id, name=rp_name)
-    user = PublicKeyCredentialUserEntity(
-        id=user_id,
-        name=user_name,
-    )
-
-    # Request ES256 (-7)
-    pub_key_params = [
-        PublicKeyCredentialParameters(
-            type=PublicKeyCredentialType.PUBLIC_KEY,
-            alg=_COSE_ES256,
-        )
-    ]
-
-    # Build the previewSign extension input for make_credential.
-    # Offer ES256 (-7) as well as ESP256-split ARKG (-65539, used by YubiKey 5.8).
-    generate_inputs = _SignInputs(
-        generate_key=_SignGenerateKeyInputs(
-            algorithms=[_COSE_ES256, _COSE_ESP256_SPLIT_ARKG]
-        ),
-    )
-
-    rk_req = (
-        ResidentKeyRequirement.REQUIRED
-        if resident_key
-        else ResidentKeyRequirement.DISCOURAGED
-    )
-    options = PublicKeyCredentialCreationOptions(
-        rp=rp,
-        user=user,
-        challenge=os.urandom(32),
-        pub_key_cred_params=pub_key_params,
-        authenticator_selection=AuthenticatorSelectionCriteria(
-            resident_key=rk_req,
-            user_verification=_resolve_uv_requirement(
-                client, require_uv=require_uv
-            ),
-        ),
-        extensions={PreviewSignExtension.NAME: generate_inputs},
-    )
-
-    try:
-        result = client.make_credential(options)
-    except Exception as exc:
-        raise Fido2PreviewSignError(
-            f"FIDO2 previewSign credential creation failed: {exc}"
-        ) from exc
-
-    # Extract the credential ID from the attestation.
-    # RegistrationResponse.response is AuthenticatorAttestationResponse,
-    # which holds the AttestationObject.
-    auth_data = result.response.attestation_object.auth_data
-    cred_data = auth_data.credential_data
-    if cred_data is None:
-        raise Fido2PreviewSignError(
-            "Attestation response missing credential data."
-        )
-    credential_id = cred_data.credential_id
-
-    # Extract the previewSign extension outputs.
-    # RegistrationResponse.client_extension_results is an
-    # AuthenticationExtensionsClientOutputs (a Mapping).
-    #
-    # Use attribute access (preview_sign) rather than dict-style
-    # .get("previewSign") -- the Mapping.__getitem__ converts rich
-    # objects to plain dicts and base64-encodes bytes, whereas
-    # __getattr__ returns the raw _SignOutputs dataclass.
-    sign_output = result.client_extension_results.preview_sign
-
-    if sign_output is None or sign_output.generated_key is None:
-        raise Fido2PreviewSignError(
-            "previewSign extension output missing from registration "
-            "response. The authenticator may not fully support "
-            "previewSign key generation."
-        )
-
-    generated = sign_output.generated_key
-    key_handle = generated.key_handle
-    public_key_bytes = generated.public_key
-    additional_args = None
-
-    if generated.algorithm == _COSE_ESP256_SPLIT_ARKG:
-        from fido2 import cbor
-        from fido2.cose import CoseKey
-
-        arkg_key = CoseKey.parse(cbor.decode(public_key_bytes))
-        ikm = os.urandom(32)
-        ctx = os.urandom(16)
-        derived_pk, sign_args = arkg_key.derive_public_key(ikm, ctx)
-        public_key_bytes = cbor.encode(dict(derived_pk))
-        additional_args = cbor.encode(sign_args)
-
-    logger.info(
-        f"Generated FIDO2 previewSign credential: "
-        f"credential_id={credential_id.hex()[:16]}..., "
-        f"key_handle={key_handle.hex()[:16]}..."
-    )
-
-    return Fido2PreviewSignDPoPSigner(
-        credential_id=credential_id,
-        key_handle=key_handle,
-        public_key_bytes=public_key_bytes,
-        rp_id=rp_id,
-        key_id=key_id,
-        device=device,
-        user_interaction=user_interaction,
-        additional_args=additional_args,
-        require_up=bool(require_up or require_uv),
-        require_uv=bool(require_uv),
-        pin=pin,
-    )
