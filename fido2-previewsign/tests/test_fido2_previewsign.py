@@ -410,7 +410,7 @@ def test_require_uv_pin_and_roundtrip():
         assert restored.require_up is True
         assert restored.require_uv is True
 
-        cli = mod._CliInteraction(pin="9988")
+        cli = mod._PinUserInteraction(pin="9988")
         assert cli.request_pin(0, "dpop.local") == "9988"
 
         fake_client = mock.MagicMock()
@@ -423,6 +423,41 @@ def test_require_uv_pin_and_roundtrip():
         assert mk_cli.call_args.kwargs["user_interaction"].request_pin(0, "dpop.local") == "9988"
         req_opts = fake_client.get_assertion.call_args[0][0]
         assert req_opts.kwargs["user_verification"] == mod.UserVerificationRequirement.REQUIRED
+
+        # Callable PIN is invoked lazily once and invalidated on PinRequiredError
+        calls = iter(["bad-pin", "good-pin"])
+        call_count = 0
+
+        def next_pin():
+            nonlocal call_count
+            call_count += 1
+            return next(calls)
+
+        signer_cb = mod.Fido2PreviewSignDPoPSigner(
+            credential_id=b"\xaa\xbb",
+            key_handle=b"\xcc\xdd",
+            public_key_bytes=b"pk",
+            device=mock.MagicMock(),
+            require_uv=True,
+            pin=next_pin,
+        )
+        assert call_count == 0
+        assert signer_cb._pin_interaction.request_pin(0, "dpop.local") == "bad-pin"
+        assert signer_cb._pin_interaction.request_pin(0, "dpop.local") == "bad-pin"
+        assert call_count == 1
+
+        class PinRequiredError(Exception):
+            pass
+
+        fake_client.get_assertion.side_effect = PinRequiredError("PIN required")
+        with mock.patch.object(mod, "_make_client", return_value=fake_client):
+            try:
+                signer_cb.sign(b"hello")
+                raise AssertionError("Expected Fido2PINRequiredError")
+            except mod.Fido2PINRequiredError:
+                pass
+        assert signer_cb._pin_interaction.request_pin(0, "dpop.local") == "good-pin"
+        assert call_count == 2
 
 
 def test_error_paths_and_up_required_message():

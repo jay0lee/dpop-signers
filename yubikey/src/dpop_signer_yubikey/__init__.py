@@ -25,9 +25,7 @@ providing sender-constrained protection resistant to extraction or malware theft
 from __future__ import annotations
 
 import base64
-import getpass
 import logging
-import sys
 from typing import Any, Callable, Mapping, Optional, Tuple, Union
 
 from cryptography.hazmat.primitives import hashes
@@ -185,9 +183,10 @@ class YubiKeyDPoPSigner(DPoPSigner):
             Defaults to ``SLOT.SIGNATURE`` (slot 0x9c).
         serial (Optional[int]): Optional serial number of the YubiKey to target
             if multiple YubiKeys are attached.
-        pin (Optional[str]): PIV PIN for operations that require PIN verification.
-        pin_callback (Optional[Callable[[], str]]): Optional callable returning
-            a PIN if interactive prompting is desired when PIN is missing.
+        pin (Optional[Union[str, Callable[[], str]]]): PIV PIN string or
+            zero-argument callable returning the PIN (invoked lazily and
+            cached). Omit to raise :class:`YubiKeyPINRequiredError` if the
+            slot requires PIN verification.
         key_id (Optional[str]): Optional custom key ID. Defaults to
             ``f"yubikey:{serial}:{slot.name.lower()}"``.
         device (Optional[YkmanDevice]): Optional pre-resolved device instance
@@ -198,8 +197,7 @@ class YubiKeyDPoPSigner(DPoPSigner):
         self,
         slot: Union[str, int, SLOT] = SLOT.SIGNATURE,
         serial: Optional[int] = None,
-        pin: Optional[str] = None,
-        pin_callback: Optional[Callable[[], str]] = None,
+        pin: Optional[Union[str, Callable[[], str]]] = None,
         key_id: Optional[str] = None,
         device: Optional[Any] = None,
     ):
@@ -211,8 +209,9 @@ class YubiKeyDPoPSigner(DPoPSigner):
 
         self._slot = parse_slot(slot)
         self._target_serial = serial
-        self._pin = pin
-        self._pin_callback = pin_callback
+        self._pin_or_factory = pin
+        self._resolved_pin = None
+        self._pin_resolved = False
         self._custom_key_id = key_id
 
         # Resolve device
@@ -319,20 +318,19 @@ class YubiKeyDPoPSigner(DPoPSigner):
         return self._serial
 
     def _get_pin(self) -> Optional[str]:
-        """Resolves the PIN via cached value, callback, or interactive prompt."""
-        if self._pin:
-            return self._pin
-        if self._pin_callback:
-            return self._pin_callback()
-        if sys.stdin.isatty():
-            try:
-                entered = getpass.getpass("Enter YubiKey PIV PIN (or press Enter to skip): ")
-                if entered.strip():
-                    self._pin = entered.strip()
-                    return self._pin
-            except (EOFError, KeyboardInterrupt):
-                pass
-        return None
+        """Resolves and caches the PIN from a literal value or callable."""
+        if not self._pin_resolved:
+            if callable(self._pin_or_factory):
+                val = self._pin_or_factory()
+                self._resolved_pin = val.strip() if isinstance(val, str) else val
+            elif self._pin_or_factory is not None:
+                self._resolved_pin = (
+                    self._pin_or_factory.strip()
+                    if isinstance(self._pin_or_factory, str)
+                    else self._pin_or_factory
+                )
+            self._pin_resolved = True
+        return self._resolved_pin or None
 
     def sign(self, data: bytes) -> bytes:
         """Signs the input bytes using the on-chip private key in the PIV slot.
@@ -355,6 +353,8 @@ class YubiKeyDPoPSigner(DPoPSigner):
                 try:
                     session.verify_pin(pin)
                 except InvalidPinError as exc:
+                    self._resolved_pin = None
+                    self._pin_resolved = False
                     attempts = getattr(exc, "attempts_remaining", None)
                     msg = (
                         f"Invalid YubiKey PIV PIN. Attempts remaining: {attempts}"
@@ -386,9 +386,11 @@ class YubiKeyDPoPSigner(DPoPSigner):
                 )
             except ApduError as exc:
                 if exc.sw == SW.SECURITY_CONDITION_NOT_SATISFIED:
+                    self._resolved_pin = None
+                    self._pin_resolved = False
                     raise YubiKeyPINRequiredError(
                         f"PIV slot {self._slot.name} requires PIN verification. "
-                        "Provide a PIN via 'pin' parameter or --yubikey-pin."
+                        "Provide a PIN via 'pin' (string or callable)."
                     ) from exc
                 raise
 

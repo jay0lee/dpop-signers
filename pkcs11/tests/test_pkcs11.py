@@ -359,3 +359,71 @@ def test_p11_kit_module_name_and_config_errors(tmp_path):
 
     with pytest.raises(mod.PKCS11ConfigError, match="No matching PKCS#11 token"):
         mod.PKCS11DPoPSigner(module_path=str(lib_file), key_label="k")
+
+
+def test_pkcs11_pin_required_errors(tmp_path):
+    lib_file = tmp_path / "fake_p11.so"
+    lib_file.write_bytes(b"")
+
+    class PinIncorrect(Exception):
+        pass
+
+    class UserNotLoggedIn(Exception):
+        pass
+
+    priv_key = ec.generate_private_key(ec.SECP256R1())
+    fake_pub = {
+        _FakeEnum.KEY_TYPE: _FakeEnum.EC,
+        _FakeEnum.EC_PARAMS: bytes.fromhex("06082a8648ce3d030107"),
+        _FakeEnum.EC_POINT: b"\x04\x41"
+        + priv_key.public_key().public_bytes(
+            serialization.Encoding.X962,
+            serialization.PublicFormat.UncompressedPoint,
+        ),
+    }
+    fake_priv = mock.MagicMock()
+    fake_priv.sign.side_effect = UserNotLoggedIn("login needed")
+    session = mock.MagicMock()
+    session.get_objects.side_effect = lambda tmpl: (
+        [fake_priv]
+        if tmpl[_FakeEnum.CLASS].name == "PRIVATE_KEY"
+        else [fake_pub]
+        if tmpl[_FakeEnum.CLASS].name == "PUBLIC_KEY"
+        else []
+    )
+
+    def fake_open(**kwargs):
+        if kwargs.get("user_pin") == "wrong":
+            raise PinIncorrect("bad pin")
+        return session
+
+    token = types.SimpleNamespace(
+        label="hsm",
+        serial="1",
+        manufacturer_id="M",
+        model="K",
+        open=mock.MagicMock(side_effect=fake_open),
+    )
+    slot = types.SimpleNamespace(slot_id=0, get_token=lambda: token)
+    mod, _, _ = _load_mod([slot])
+
+    with pytest.raises(mod.PKCS11PINRequiredError, match="bad pin"):
+        mod.PKCS11DPoPSigner(
+            "pkcs11:object=k", module_path=str(lib_file), pin="wrong"
+        )
+
+    pin_calls = 0
+
+    def pin_fn():
+        nonlocal pin_calls
+        pin_calls += 1
+        return "1234"
+
+    signer = mod.PKCS11DPoPSigner(
+        "pkcs11:object=k", module_path=str(lib_file), pin=pin_fn
+    )
+    assert pin_calls == 1
+    with pytest.raises(mod.PKCS11PINRequiredError, match="login needed"):
+        signer.sign(b"hello")
+    assert signer._pin_resolved is False
+    assert signer._session is None

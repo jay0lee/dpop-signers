@@ -46,12 +46,10 @@ Lifecycle
 from __future__ import annotations
 
 import base64
-import getpass
 import hashlib
 import logging
 import os
-import sys
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional, Union
 
 from cryptography.hazmat.primitives.asymmetric import ec
 from google.auth.dpop import DPoPSigner, der_to_raw_ecdsa_signature
@@ -114,22 +112,57 @@ class Fido2ExtensionNotSupportedError(Fido2PreviewSignError):
     pass
 
 
-class _CliInteraction(UserInteraction):
-    """Simple CLI-based user interaction for FIDO2 operations."""
+class Fido2PINRequiredError(Fido2PreviewSignError):
+    """Raised when the FIDO2 device requires a PIN or PIN verification fails."""
 
-    def __init__(self, pin: Optional[str] = None):
-        self._pin = pin
+    pass
+
+
+_CTAP_PIN_ERR_CODES = frozenset({0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37})
+
+
+def _is_pin_error(exc: Exception) -> bool:
+    """Returns True if *exc* represents a FIDO2/CTAP PIN failure."""
+    if type(exc).__name__ == "PinRequiredError":
+        return True
+    for candidate in (exc, getattr(exc, "cause", None)):
+        if candidate is None:
+            continue
+        if type(candidate).__name__ == "PinRequiredError":
+            return True
+        if getattr(candidate, "code", None) in _CTAP_PIN_ERR_CODES:
+            return True
+    return False
+
+
+_BaseUserInteraction = (
+    UserInteraction if _FIDO2_AVAILABLE and isinstance(UserInteraction, type) else object
+)
+
+
+class _PinUserInteraction(_BaseUserInteraction):
+    """Non-prompting FIDO2 UserInteraction driven by a PIN string or callable."""
+
+    def __init__(self, pin: Optional[Union[str, Callable[[], str]]] = None):
+        self._pin_or_factory = pin
+        self._resolved_pin: Optional[str] = None
+        self._pin_resolved = False
+
+    def invalidate(self) -> None:
+        self._resolved_pin = None
+        self._pin_resolved = False
 
     def prompt_up(self):
-        print("\nTouch your security key...", file=sys.stderr, flush=True)
+        pass
 
     def request_pin(self, permissions, rp_id):
-        if self._pin is not None:
-            return self._pin
-        try:
-            return getpass.getpass("Enter FIDO2 PIN: ")
-        except (EOFError, KeyboardInterrupt):
-            return None
+        if not self._pin_resolved:
+            if callable(self._pin_or_factory):
+                self._resolved_pin = self._pin_or_factory()
+            elif self._pin_or_factory is not None:
+                self._resolved_pin = self._pin_or_factory
+            self._pin_resolved = True
+        return self._resolved_pin
 
     def request_uv(self, permissions, rp_id):
         return True
@@ -191,7 +224,7 @@ def _make_client(device, rp_id=_DEFAULT_RP_ID, user_interaction=None):
     return Fido2Client(
         device,
         client_data_collector=DefaultClientDataCollector(origin),
-        user_interaction=user_interaction or _CliInteraction(),
+        user_interaction=user_interaction or _PinUserInteraction(),
         extensions=[PreviewSignExtension()],
     )
 
@@ -297,8 +330,9 @@ class Fido2PreviewSignDPoPSigner(DPoPSigner):
         require_uv (bool): Whether user verification (PIN/biometric) is
             required for each signature. Defaults to ``False``. Implies
             user presence when enabled.
-        pin (Optional[str]): Optional FIDO2 PIN for non-interactive PIN
-            prompts when ``user_interaction`` is not provided.
+        pin (Optional[Union[str, Callable[[], str]]]): Optional FIDO2 PIN
+            string or zero-argument callable returning the PIN (invoked
+            lazily and cached) when ``user_interaction`` is not provided.
     """
 
     def __init__(
@@ -313,7 +347,7 @@ class Fido2PreviewSignDPoPSigner(DPoPSigner):
         additional_args: Optional[bytes] = None,
         require_up: bool = False,
         require_uv: bool = False,
-        pin: Optional[str] = None,
+        pin: Optional[Union[str, Callable[[], str]]] = None,
     ):
         if not _FIDO2_AVAILABLE:
             raise Fido2PreviewSignError(
@@ -331,6 +365,7 @@ class Fido2PreviewSignDPoPSigner(DPoPSigner):
         self._require_uv = bool(require_uv)
         self._require_up = bool(require_up or require_uv)
         self._pin = pin
+        self._pin_interaction = _PinUserInteraction(pin=pin)
 
         # Parse the COSE public key
         self._public_key, self._public_jwk, self._algorithm = (
@@ -424,7 +459,7 @@ class Fido2PreviewSignDPoPSigner(DPoPSigner):
         client = _make_client(
             device,
             rp_id=self._rp_id,
-            user_interaction=self._user_interaction or _CliInteraction(pin=self._pin),
+            user_interaction=self._user_interaction or self._pin_interaction,
         )
 
         cred_descriptor = PublicKeyCredentialDescriptor(
@@ -463,6 +498,11 @@ class Fido2PreviewSignDPoPSigner(DPoPSigner):
         try:
             result = client.get_assertion(options)
         except Exception as exc:
+            if _is_pin_error(exc):
+                self._pin_interaction.invalidate()
+                raise Fido2PINRequiredError(
+                    f"FIDO2 PIN required or invalid: {exc}"
+                ) from exc
             raise Fido2PreviewSignError(
                 f"FIDO2 previewSign assertion failed: {exc}"
             ) from exc
@@ -512,6 +552,11 @@ class Fido2PreviewSignDPoPSigner(DPoPSigner):
                 {"up": False},
             )
         except Exception as exc:
+            if _is_pin_error(exc):
+                self._pin_interaction.invalidate()
+                raise Fido2PINRequiredError(
+                    f"FIDO2 PIN required or invalid: {exc}"
+                ) from exc
             if getattr(exc, "code", None) == 0x3B:
                 raise Fido2PreviewSignError(
                     "Credential requires User Presence (touch). Re-generate "
@@ -560,7 +605,7 @@ class Fido2PreviewSignDPoPSigner(DPoPSigner):
         data: dict,
         device=None,
         user_interaction=None,
-        pin: Optional[str] = None,
+        pin: Optional[Union[str, Callable[[], str]]] = None,
     ) -> "Fido2PreviewSignDPoPSigner":
         """Restores a signer from a previously serialized dictionary.
 
@@ -568,8 +613,9 @@ class Fido2PreviewSignDPoPSigner(DPoPSigner):
             data (dict): The dictionary from :meth:`to_dict`.
             device: Optional CtapHidDevice to use.
             user_interaction: Optional UserInteraction for PIN/touch.
-            pin (Optional[str]): Optional FIDO2 PIN for non-interactive
-                prompts when ``user_interaction`` is not provided.
+            pin (Optional[Union[str, Callable[[], str]]]): Optional FIDO2 PIN
+                string or zero-argument callable when ``user_interaction``
+                is not provided.
 
         Returns:
             Fido2PreviewSignDPoPSigner: The restored signer instance.

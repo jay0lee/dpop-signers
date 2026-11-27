@@ -67,6 +67,10 @@ signer = PKCS11DPoPSigner(
 
 Any explicit keyword arguments (`module_path=`, `pin=`, `token_label=`, `key_label=`, `cka_id=`, `slot_id=`, `token_serial=`) override the corresponding URI attribute.
 
+`dpop-signer-pkcs11` never prompts on stdin. Pass `pin=` as a string or
+zero-argument callable (or `pin-source=` in the URI); missing or incorrect PIN
+errors raise `PKCS11PINRequiredError`.
+
 ## Common Module Paths
 
 | Backend | OS | Typical `module-path` |

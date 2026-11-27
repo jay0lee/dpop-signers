@@ -83,6 +83,27 @@ class LinuxTPMDPoPError(Exception):
     pass
 
 
+class LinuxTPMAuthRequiredError(LinuxTPMDPoPError):
+    """Raised when TPM signing requires or rejects key authorization."""
+    pass
+
+
+# TPM2_RC_AUTH_MISSING (0x125), TPM2_RC_BAD_AUTH (0x922),
+# TPM2_RC_AUTH_UNAVAILABLE (0x924), TPM2_RC_AUTH_FAIL (0x98E).
+_TPM_AUTH_RCS = frozenset({0x125, 0x922, 0x924, 0x98E})
+
+
+def _is_tpm_auth_error(exc):
+    """Returns True if *exc* looks like a TPM authorization failure."""
+    if getattr(exc, "rc", None) in _TPM_AUTH_RCS:
+        return True
+    msg = str(exc).lower()
+    return any(
+        tok in msg
+        for tok in ("auth_fail", "bad_auth", "auth_missing", "authorization")
+    )
+
+
 class LinuxTPMDPoPSigner(DPoPSigner):
     """DPoP signer backed by a Linux TPM 2.0 persistent key.
 
@@ -99,8 +120,10 @@ class LinuxTPMDPoPSigner(DPoPSigner):
         tcti (Optional[str]): TCTI connection string.  Defaults to
             ``None`` which uses the default TCTI (typically
             ``device:/dev/tpmrm0``).
-        auth (Optional[str]): Authorization value (password) for the
-            key, if one was set during provisioning.
+        auth (Optional[Union[str, Callable[[], str]]]): Authorization
+            value (password) or zero-argument callable returning the
+            password (invoked lazily and cached), if set during
+            provisioning.
         key_id (Optional[str]): Custom identifier for this key.
     """
 
@@ -119,7 +142,9 @@ class LinuxTPMDPoPSigner(DPoPSigner):
 
         self._handle_int = handle
         self._tcti = tcti
-        self._auth = auth
+        self._auth_or_factory = auth
+        self._resolved_auth = None
+        self._auth_resolved = False
         self._custom_key_id = key_id
 
         # Connect to TPM and read the public key.
@@ -130,6 +155,16 @@ class LinuxTPMDPoPSigner(DPoPSigner):
             "algorithm=%s, thumbprint=%s...",
             handle, self._algorithm, self.thumbprint[:16],
         )
+
+    def _get_auth(self):
+        """Resolves and caches the TPM key authorization value."""
+        if not self._auth_resolved:
+            if callable(self._auth_or_factory):
+                self._resolved_auth = self._auth_or_factory()
+            else:
+                self._resolved_auth = self._auth_or_factory
+            self._auth_resolved = True
+        return self._resolved_auth or None
 
     def _get_esapi(self):
         """Create a new ESAPI context."""
@@ -223,7 +258,8 @@ class LinuxTPMDPoPSigner(DPoPSigner):
             # Set authorization value for the key handle.
             # tr_from_tpmpublic creates a bare handle without auth context,
             # so we must always set it before using PASSWORD sessions.
-            ectx.tr_set_auth(key_handle, self._auth if self._auth else None)
+            auth = self._get_auth()
+            ectx.tr_set_auth(key_handle, auth)
 
             # Explicitly specify the signing scheme rather than relying
             # on the key's embedded scheme.  Keys created with a NULL
@@ -252,6 +288,13 @@ class LinuxTPMDPoPSigner(DPoPSigner):
                     session1=ESYS_TR.PASSWORD,
                 )
             except Exception as exc:
+                if _is_tpm_auth_error(exc):
+                    self._resolved_auth = None
+                    self._auth_resolved = False
+                    raise LinuxTPMAuthRequiredError(
+                        f"TPM key authorization required or invalid for "
+                        f"handle 0x{self._handle_int:08x}: {exc}"
+                    ) from exc
                 raise LinuxTPMDPoPError(
                     f"TPM signing failed: {exc}.  Ensure the key at "
                     f"handle 0x{self._handle_int:08x} is an unrestricted "

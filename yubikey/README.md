@@ -16,11 +16,15 @@ Requires [yubikey-manager](https://docs.yubico.com/software/yubikey/tools/ykman/
 ## Usage
 
 ```python
-from dpop_signer_yubikey import YubiKeyDPoPSigner
+import getpass
+from dpop_signer_yubikey import YubiKeyDPoPSigner, YubiKeyPINRequiredError
 
+# Static PIN or deferred callable (invoked lazily on sign(), cached for session):
 signer = YubiKeyDPoPSigner(pin="123456")
-# or specify a slot:
-signer = YubiKeyDPoPSigner(slot="9a", pin="123456")
+signer = YubiKeyDPoPSigner(slot="9a", pin=lambda: getpass.getpass("PIV PIN: "))
+
+# If PIN is omitted and the slot requires verification, sign() raises
+# YubiKeyPINRequiredError so the caller can decide how to prompt or fail.
 ```
 
 ## Key Setup
@@ -85,3 +89,8 @@ The default PIV PIN is `123456`. Change it:
 ```bash
 ykman piv access change-pin
 ```
+
+`dpop-signer-yubikey` never reads from stdin or prompts on its own. Pass `pin=`
+as either a string or a zero-argument callable (for example `lambda: getpass.getpass(...)`);
+omitting it on a PIN-protected slot or passing a wrong PIN raises
+`YubiKeyPINRequiredError`.

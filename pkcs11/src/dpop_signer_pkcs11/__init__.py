@@ -95,6 +95,26 @@ class PKCS11ConfigError(PKCS11DPoPError):
     """Raised when the PKCS#11 URI, module, token, or key config is invalid."""
 
 
+class PKCS11PINRequiredError(PKCS11DPoPError):
+    """Raised when a PKCS#11 token requires a PIN or the PIN is invalid."""
+
+
+_PKCS11_PIN_ERROR_NAMES = frozenset({
+    "PinExpired",
+    "PinIncorrect",
+    "PinInvalid",
+    "PinLenRange",
+    "PinLocked",
+    "UserNotLoggedIn",
+    "UserPinNotInitialized",
+})
+
+
+def _is_pkcs11_pin_error(exc):
+    """Returns True if *exc* represents a PKCS#11 PIN or login failure."""
+    return type(exc).__name__ in _PKCS11_PIN_ERROR_NAMES
+
+
 def _b64url_encode(data):
     """Encodes bytes as unpadded URL-safe base64 ASCII text."""
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
@@ -606,11 +626,20 @@ class PKCS11DPoPSigner(DPoPSigner):
         """Returns the cached PKCS#11 session, opening one if needed."""
         if self._session is None:
             pin = self._get_pin()
-            self._session = (
-                self._token.open(user_pin=pin)
-                if pin is not None
-                else self._token.open()
-            )
+            try:
+                self._session = (
+                    self._token.open(user_pin=pin)
+                    if pin is not None
+                    else self._token.open()
+                )
+            except Exception as exc:
+                if _is_pkcs11_pin_error(exc):
+                    self._resolved_pin = None
+                    self._pin_resolved = False
+                    raise PKCS11PINRequiredError(
+                        f"PKCS#11 PIN required or invalid: {exc}"
+                    ) from exc
+                raise
         return self._session
 
     def _object_filter(self, obj_class):
@@ -728,6 +757,13 @@ class PKCS11DPoPSigner(DPoPSigner):
             except PKCS11DPoPError:
                 raise
             except Exception as exc:
+                if _is_pkcs11_pin_error(exc):
+                    self.close()
+                    self._resolved_pin = None
+                    self._pin_resolved = False
+                    raise PKCS11PINRequiredError(
+                        f"PKCS#11 PIN required or invalid: {exc}"
+                    ) from exc
                 raise PKCS11DPoPError(f"PKCS#11 signing failed: {exc}") from exc
 
     def close(self):

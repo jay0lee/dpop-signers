@@ -161,7 +161,7 @@ Fido2PreviewSignDPoPSigner(
     additional_args=None,    # CBOR ARKG signing args (for ESP256-split keys)
     require_up=False,        # True = require touch per signature
     require_uv=False,        # True = require PIN/biometric per signature
-    pin=None,                # Optional FIDO2 PIN (non-interactive)
+    pin=None,                # Optional FIDO2 PIN string or callable (raises Fido2PINRequiredError if needed and omitted)
 )
 ```
 

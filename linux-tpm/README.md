@@ -130,3 +130,6 @@ sudo usermod -aG tss $USER
 - ECDSA P-256 (ES256) and RSA (RS256) are supported by this signer.
 - The primary key context is only needed during key creation. The persistent
   handle is all that's needed afterward.
+- If the key was provisioned with an authorization password, pass `auth=` as a
+  string or zero-argument callable (`Callable[[], str]`); missing or wrong
+  authorization raises `LinuxTPMAuthRequiredError` (no stdin prompt).

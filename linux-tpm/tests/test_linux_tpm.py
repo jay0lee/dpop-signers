@@ -94,3 +94,70 @@ def test_linux_tpm_es256_jwk_and_sign():
             proof, pyjwt.PyJWK.from_dict(header["jwk"]).key, algorithms=["ES256"]
         )
         assert claims["htm"] == "POST"
+
+
+def test_linux_tpm_auth_callable_and_error():
+    import pytest
+
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    nums = private_key.public_key().public_numbers()
+
+    fake_tpm2 = _fake_tpm2_pytss()
+    pub = types.SimpleNamespace(
+        publicArea=types.SimpleNamespace(
+            type=fake_tpm2.TPM2_ALG.ECC,
+            parameters=types.SimpleNamespace(
+                eccDetail=types.SimpleNamespace(curveID=0x0003)
+            ),
+            unique=types.SimpleNamespace(
+                ecc=types.SimpleNamespace(
+                    x=nums.x.to_bytes(32, "big"),
+                    y=nums.y.to_bytes(32, "big"),
+                )
+            ),
+        )
+    )
+
+    ectx = mock.MagicMock()
+    ectx.read_public.return_value = (pub, None, None)
+
+    def fake_sign(key_handle, digest, in_scheme, validation, session1):
+        der = private_key.sign(digest, ec.ECDSA(utils.Prehashed(hashes.SHA256())))
+        r, s = utils.decode_dss_signature(der)
+        return types.SimpleNamespace(
+            sigAlg=fake_tpm2.TPM2_ALG.ECDSA,
+            signature=types.SimpleNamespace(
+                ecdsa=types.SimpleNamespace(
+                    signatureR=r.to_bytes(32, "big"),
+                    signatureS=s.to_bytes(32, "big"),
+                )
+            ),
+        )
+
+    ectx.sign.side_effect = fake_sign
+    fake_tpm2.ESAPI.return_value = ectx
+
+    auth_calls = 0
+
+    def auth_provider():
+        nonlocal auth_calls
+        auth_calls += 1
+        return "tpm-secret"
+
+    sys.modules.pop("dpop_signer_linux_tpm", None)
+    with mock.patch.dict(sys.modules, {"tpm2_pytss": fake_tpm2}):
+        mod = importlib.import_module("dpop_signer_linux_tpm")
+        signer = mod.LinuxTPMDPoPSigner(handle=0x81000001, auth=auth_provider)
+        assert auth_calls == 0
+
+        signer.sign(b"one")
+        signer.sign(b"two")
+        assert auth_calls == 1
+        ectx.tr_set_auth.assert_called_with(mock.ANY, "tpm-secret")
+
+        auth_err = Exception("TPM2_RC_AUTH_FAIL")
+        auth_err.rc = 0x98E
+        ectx.sign.side_effect = auth_err
+        with pytest.raises(mod.LinuxTPMAuthRequiredError):
+            signer.sign(b"three")
+        assert signer._auth_resolved is False
